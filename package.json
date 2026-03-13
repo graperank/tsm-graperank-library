@@ -1,0 +1,26 @@
+{
+  "name": "graperank-tsm",
+  "version": "1.0.0",
+  "description": "GrapeRank TSM (Trust Service Machines) - a highly configurable TSM service for ranking Nostr users and content.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "nostr",
+    "ranking",
+    "trustr",
+    "tsm",
+    "wot",
+    "webs of trust"
+  ],
+  "author": "Manuel Mejia",
+  "license": "MIT",
+  "dependencies": {
+    "nostr-tools": "^2.7.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
+  }
+}
