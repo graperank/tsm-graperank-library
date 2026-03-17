@@ -127,14 +127,14 @@ InterpreterFactory.set('nostr-zaps-9735', () => new NostrInterpreterClass<ZapPar
   {
     kinds : [9735],
     modes: [{
-      name: 'sender-zaps-recipient',
-      description: 'Interprets interactions where sender(s) [P tag] zap recipient(s) [p tag].',
+      name: 'actor-zaps-subject',
+      description: 'Interprets interactions where actors(s) [P tag] zap subject(s) [p tag].',
       actorType: 'P',
       subjectType: 'p'
     },
     {
-      name: 'recipient-zapped-by-sender',
-      description: 'Interprets interactions where recipient(s) [p tag] are zapped by sender(s) [P tag].',
+      name: 'subject-zaps-actor',
+      description: 'Interprets interactions where subject(s) [P tag] zap actor(s) [p tag].',
       actorType: 'p',
       subjectType: 'P'
     }],
