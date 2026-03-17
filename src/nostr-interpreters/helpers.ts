@@ -10,6 +10,8 @@ const relays = [
   "wss://nos.lol",
 ]
 
+export const maxauthors = 500
+
 /**
  * Adapted from NDK
  * @param filters 

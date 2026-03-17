@@ -54,6 +54,18 @@ export type CalculatorIterationStatus = Record<
 
 export type RankingsEntry = [subjectId, RankingData]
 
+export type InterpretationMode<ActorType = string, SubjectType = string> = {
+  name: string
+  description: string
+  actorType: ActorType
+  subjectType: SubjectType
+}
+
+export type InterpretResult = {
+  interactions: InteractionsMap
+  subjects: Set<subjectId>
+}
+
 export type InterpreterParams = {
   value: number
   confidence: number
@@ -116,8 +128,9 @@ export interface Interpreter<ParamsType extends InterpreterParams> {
   params: ParamsType
   readonly fetched: Set<any>[]
   readonly interactions: InteractionsMap
-  fetchData(this: Interpreter<ParamsType>, authors?: Set<actorId>): Promise<number>
-  interpret(this: Interpreter<ParamsType>, fetchedIndex?: number): Promise<InteractionsMap>
+  discoveredActors?: Set<actorId>
+  fetchData(this: Interpreter<ParamsType>, authors?: Set<actorId>, subjects?: Set<subjectId>): Promise<number>
+  interpret(this: Interpreter<ParamsType>, fetchedIndex?: number): Promise<InterpretResult>
 }
 
 export type InterpreterInitializer = () => Interpreter<InterpreterParams>

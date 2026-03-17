@@ -2,10 +2,11 @@ import { Event as NostrEvent} from 'nostr-tools/core'
 import { Filter as NostrFilter} from 'nostr-tools/filter'
 import { SimplePool } from 'nostr-tools/pool'
 import { useWebSocketImplementation } from 'nostr-tools/pool'
-import { subjectId, Interpreter, InterpreterParams, InterpreterRequest, InteractionData, InteractionsMap, actorId, InterpreterInitializer, lowercase } from "../types"
-import WebSocket from 'ws'
+import { subjectId, Interpreter, InterpreterRequest, InteractionData, InteractionsMap, actorId, InterpreterInitializer, lowercase, InterpretResult } from "../types"
+import { NostrInterpreterParams, NostrInterpretationMode } from "./types"
 import { applyInteractionsByTag } from "./callbacks"
-import { fetchEvents, sliceBigArray } from "./helpers"
+import { fetchEvents, sliceBigArray, maxauthors } from "./helpers"
+import WebSocket from 'ws'
 useWebSocketImplementation(WebSocket)
 
 const relays = [
@@ -25,7 +26,6 @@ const relays = [
   "wss://nos.lol",
 ]
 
-const maxauthors = 1000
 const delaybetweenfetches = 500 // milliceconds
 
 export type NostrInterpreterId = `nostr-${lowercase}-${number}`
@@ -40,46 +40,73 @@ export class NostrInterpreterFactory extends Map<NostrInterpreterId, Interpreter
   }
 }
 
-export type NostrInterpreterConfig<ParamsType extends InterpreterParams> = {
+export type NostrInterpreterConfig<ParamsType extends NostrInterpreterParams> = {
   kinds : number[],
   params : ParamsType,
+  modes : NostrInterpretationMode[],
   interpret? : 
     (instance : Interpreter<ParamsType>, dos : number) 
-    => Promise<InteractionsMap>,
+    => Promise<InterpretResult>,
   validate? : 
     (events : Set<NostrEvent>, authors : actorId[], previous? : Set<NostrEvent>) 
     => boolean | actorId[],
 }
 
-export class NostrInterpreterClass<ParamsType extends InterpreterParams> implements Interpreter<ParamsType> {
+export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> implements Interpreter<ParamsType> {
   readonly kinds : number[]
+  readonly modes : NostrInterpretationMode[]
+  private _activeMode : NostrInterpretationMode
+  discoveredActors? : Set<actorId>
   request? : InterpreterRequest
   private _params : ParamsType
   get params(){ return {...this._params, ...this.request?.params}}
+  get actorType() { return this._activeMode.actorType }
+  get subjectType() { return this._activeMode.subjectType }
   fetched : Set<NostrEvent>[] = []
   interactions : InteractionsMap = new Map()
-  interpret : (dos? : number) => Promise<InteractionsMap>
+  interpret : (dos? : number) => Promise<InterpretResult>
   validate? : 
   (events : Set<NostrEvent>, authors : actorId[], previous? : Set<NostrEvent>) 
   => boolean | actorId[]
 
   constructor(config: NostrInterpreterConfig<ParamsType>){
     this.kinds = config.kinds
+    this.modes = config.modes
     this._params = config.params
     this.validate = config.validate
+    
+    if(!this.modes.length) {
+      throw('NostrInterpreterClass requires at least one mode')
+    }
+    
+    this._activeMode = this.modes[0]
+    
     this.interpret = async (dos? : number) => {
       if(!this.fetched.length) throw('GrapeRank : '+this.request?.interpId+' interpreter interpret() : ERROR : NO EVENTS FETCHED PRIOR TO INTERPRET')
       // use the set of fetched events at fetchedIndex or LAST index
       dos = dos || this.fetched.length
       let fetchedIndex = dos - 1
-      let newInteractions : InteractionsMap 
+      
+      // Select mode from request params if provided
+      const requestedMode = this.request?.params?.mode
+      if(requestedMode) {
+        const mode = this.modes.find(m => m.name === requestedMode)
+        if(!mode) {
+          throw(`Invalid mode '${requestedMode}'. Available: ${this.modes.map(m => m.name).join(', ')}`)
+        }
+        this._activeMode = mode
+      }
+      
+      let result : InterpretResult
       console.log("GrapeRank : ",this.request?.interpId," interpreter : interpreting " ,this.fetched[fetchedIndex].size, " events fetched in iteration ", dos)
       // interpret newInteractions via defined callback or default
       if(config.interpret) {
-        newInteractions = await config.interpret(this, dos) 
+        result = await config.interpret(this, dos) 
       }else{
-        newInteractions = await applyInteractionsByTag(this, dos)
+        result = await applyInteractionsByTag(this, dos)
       }
+      
+      const newInteractions = result.interactions
 
       // merge newInteractions into this.interactions
       let numInteractionsMerged = 0
@@ -102,19 +129,31 @@ export class NostrInterpreterClass<ParamsType extends InterpreterParams> impleme
 
       console.log("GrapeRank : ",this.request?.interpId," interpreter : merged iteration ",dos," into total interpreted : ", numInteractionsMerged ," new interactions and ",numInteractionsDuplicate," duplicate interactions from ",newInteractions.size," authors")
 
-      return newInteractions
+      return result
     }
   }
 
   // breaks up a large actors list into multiple authors lists 
   // suitable for relay requests, and sends them all in parallel
   // returns a single promise that is resolved when all fetches are complete.
-  async fetchData(authors? : Set<actorId>) : Promise<number> {
+  async fetchData(authors? : Set<actorId>, subjects? : Set<subjectId>) : Promise<number> {
+    this.discoveredActors = new Set()
+    
+    const fetchActors = new Set<actorId>()
+    if(authors) authors.forEach(a => fetchActors.add(a))
+    
+    if(subjects) {
+      subjects.forEach(s => {
+        fetchActors.add(s)
+        this.discoveredActors!.add(s)
+      })
+    }
+    if(!fetchActors.size) return 0
+    if(!this.request) throw('no request set for this interpreter')
     authors = authors || new Set(this.request?.authors)
     // authorslists is authors broken into an array of list, 
     // where each list is maximum size allowed for relay requests
-    const authorslists : actorId[][] = authors.size > maxauthors ? 
-      sliceBigArray([...authors], maxauthors) : [[...authors]]
+    const authorslists = fetchActors.size > maxauthors ? sliceBigArray([...fetchActors], maxauthors) : [[...fetchActors]]
     // fetchedSet is where each promise will add newly fetched events
     const fetchedSet : Set<NostrEvent> = new Set()
     const promises : Promise<void>[] = []
