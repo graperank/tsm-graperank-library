@@ -2,11 +2,12 @@ import { Event as NostrEvent} from 'nostr-tools/core'
 import { Filter as NostrFilter} from 'nostr-tools/filter'
 import { SimplePool } from 'nostr-tools/pool'
 import { useWebSocketImplementation } from 'nostr-tools/pool'
-import { subjectId, Interpreter, InterpreterRequest, InteractionData, InteractionsMap, actorId, InterpreterInitializer, lowercase, InterpretResult } from "../types"
-import { NostrInterpreterParams, NostrInterpretationMode } from "./types"
+import { subjectId, Interpreter, InterpreterRequest, InteractionsMap, actorId, InterpreterInitializer, InterpreterParams, InterpreterId, InteractionData } from "../types"
+import { NostrInterpreterClassConfig, NostrInterpreterId, NostrInterpreterKeys, NostrInterpreterParams, NostrType } from "./types"
 import { applyInteractionsByTag } from "./callbacks"
-import { fetchEvents, sliceBigArray, maxauthors } from "./helpers"
+import { fetchEvents, sliceBigArray, maxfetch } from "./helpers"
 import WebSocket from 'ws'
+import { InterpreterFactory } from '../graperank/interpretation'
 useWebSocketImplementation(WebSocket)
 
 const relays = [
@@ -28,77 +29,71 @@ const relays = [
 
 const delaybetweenfetches = 500 // milliceconds
 
-export type NostrInterpreterId = `nostr-${lowercase}-${number}`
 
-export class NostrInterpreterFactory extends Map<NostrInterpreterId, InterpreterInitializer> {
-  parseID(id: NostrInterpreterId): { source: string; [key: string]: string | number } {
-    const split = id.split('-')
-    return { source: split.shift()!, kind: Number(split.pop()), label: split.join('-') }
-  }
-  getIDsByKind(kind: number): NostrInterpreterId[] {
-    return Array.from(this.keys()).filter((id) => this.parseID(id).kind === kind)
-  }
+function parseNostrInterpreterID(id: NostrInterpreterId): NostrInterpreterKeys {
+  const split = id.split('-')
+  const kind = Number(split[1])
+  const type = split[2] as NostrType
+  return { kind, type }
+}
+function constructNostrInterpreterID(key: NostrInterpreterKeys): NostrInterpreterId {
+  return `nostr-${key.kind}${key.type ? `-${key.type}` : ''}` as NostrInterpreterId
 }
 
-export type NostrInterpreterConfig<ParamsType extends NostrInterpreterParams> = {
-  kinds : number[],
-  params : ParamsType,
-  modes : NostrInterpretationMode[],
-  interpret? : 
-    (instance : Interpreter<ParamsType>, dos : number) 
-    => Promise<InterpretResult>,
-  validate? : 
-    (events : Set<NostrEvent>, authors : actorId[], previous? : Set<NostrEvent>) 
-    => boolean | actorId[],
+export class NostrInterpreterFactory extends InterpreterFactory<"nostr"> {
+  readonly namespace = "nostr"
+  parseID = parseNostrInterpreterID
+  getID = constructNostrInterpreterID
 }
 
+/**
+ * Nostr interpreters are responsible for
+ * fetching published events and normalizing their content 
+ * as user or event interactions.
+ * 
+ */
 export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> implements Interpreter<ParamsType> {
-  readonly kinds : number[]
-  readonly modes : NostrInterpretationMode[]
-  private _activeMode : NostrInterpretationMode
+  // Nostr interpreters are identified by kinmd number and tag type
+  readonly interpreterId: NostrInterpreterId
+  // labels and descriptions for improved user experiences 
+  readonly label: string
+  readonly description: string
+  // 
+  readonly fetchKinds : number[]
+  readonly allowedActorTypes: string[]
+  readonly allowedSubjectTypes: string[]
   discoveredActors? : Set<actorId>
-  request? : InterpreterRequest
-  private _params : ParamsType
-  get params(){ return {...this._params, ...this.request?.params}}
-  get actorType() { return this._activeMode.actorType }
-  get subjectType() { return this._activeMode.subjectType }
+  request? : InterpreterRequest<ParamsType>
+  private defaultParams : ParamsType
+  get params(){ 
+    return {...this.defaultParams, ...this.request?.params}
+  }
+  
   fetched : Set<NostrEvent>[] = []
   interactions : InteractionsMap = new Map()
-  interpret : (dos? : number) => Promise<InterpretResult>
+  interpret : (dos? : number) => Promise<InteractionsMap | undefined>
   validate? : 
   (events : Set<NostrEvent>, authors : actorId[], previous? : Set<NostrEvent>) 
   => boolean | actorId[]
 
-  constructor(config: NostrInterpreterConfig<ParamsType>){
-    this.kinds = config.kinds
-    this.modes = config.modes
-    this._params = config.params
+  constructor(config: NostrInterpreterClassConfig<ParamsType>){
+    this.interpreterId = constructNostrInterpreterID({kind: config.interpretKind})
+    this.label = config.label
+    this.description = config.description
+    this.fetchKinds = config.fetchKinds
+    this.allowedActorTypes = config.allowedActorTypes
+    this.allowedSubjectTypes = config.allowedSubjectTypes
+    this.defaultParams = config.defaultParams
     this.validate = config.validate
     
-    if(!this.modes.length) {
-      throw('NostrInterpreterClass requires at least one mode')
-    }
-    
-    this._activeMode = this.modes[0]
-    
     this.interpret = async (dos? : number) => {
-      if(!this.fetched.length) throw('GrapeRank : '+this.request?.interpId+' interpreter interpret() : ERROR : NO EVENTS FETCHED PRIOR TO INTERPRET')
+      if(!this.fetched.length) throw('GrapeRank : '+this.request?.interpreterId+' interpreter interpret() : ERROR : NO EVENTS FETCHED PRIOR TO INTERPRET')
       // use the set of fetched events at fetchedIndex or LAST index
       dos = dos || this.fetched.length
       let fetchedIndex = dos - 1
       
-      // Select mode from request params if provided
-      const requestedMode = this.request?.params?.mode
-      if(requestedMode) {
-        const mode = this.modes.find(m => m.name === requestedMode)
-        if(!mode) {
-          throw(`Invalid mode '${requestedMode}'. Available: ${this.modes.map(m => m.name).join(', ')}`)
-        }
-        this._activeMode = mode
-      }
-      
-      let result : InterpretResult
-      console.log("GrapeRank : ",this.request?.interpId," interpreter : interpreting " ,this.fetched[fetchedIndex].size, " events fetched in iteration ", dos)
+      let result : InteractionsMap | undefined
+      console.log("GrapeRank : ",this.request?.interpreterId," interpreter : interpreting " ,this.fetched[fetchedIndex].size, " events fetched in iteration ", dos)
       // interpret newInteractions via defined callback or default
       if(config.interpret) {
         result = await config.interpret(this, dos) 
@@ -106,7 +101,7 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
         result = await applyInteractionsByTag(this, dos)
       }
       
-      const newInteractions = result.interactions
+      const newInteractions = result || new Map<actorId, Map<subjectId, InteractionData>>()
 
       // merge newInteractions into this.interactions
       let numInteractionsMerged = 0
@@ -127,20 +122,20 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
         }
       })
 
-      console.log("GrapeRank : ",this.request?.interpId," interpreter : merged iteration ",dos," into total interpreted : ", numInteractionsMerged ," new interactions and ",numInteractionsDuplicate," duplicate interactions from ",newInteractions.size," authors")
+      console.log("GrapeRank : ",this.request?.interpreterId," interpreter : merged iteration ",dos," into total interpreted : ", numInteractionsMerged ," new interactions and ",numInteractionsDuplicate," duplicate interactions from ",newInteractions.size," authors")
 
       return result
     }
   }
 
-  // breaks up a large actors list into multiple authors lists 
+  // breaks up a large actors list into multiple actors lists 
   // suitable for relay requests, and sends them all in parallel
   // returns a single promise that is resolved when all fetches are complete.
-  async fetchData(authors? : Set<actorId>, subjects? : Set<subjectId>) : Promise<number> {
+  async fetchData(actors? : Set<actorId>, subjects? : Set<subjectId>) : Promise<number> {
     this.discoveredActors = new Set()
     
     const fetchActors = new Set<actorId>()
-    if(authors) authors.forEach(a => fetchActors.add(a))
+    if(actors) actors.forEach(a => fetchActors.add(a))
     
     if(subjects) {
       subjects.forEach(s => {
@@ -150,21 +145,21 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     }
     if(!fetchActors.size) return 0
     if(!this.request) throw('no request set for this interpreter')
-    authors = authors || new Set(this.request?.authors)
-    // authorslists is authors broken into an array of list, 
+    actors = actors || new Set(this.request?.actors)
+    // actorslists is actors broken into an array of list, 
     // where each list is maximum size allowed for relay requests
-    const authorslists = fetchActors.size > maxauthors ? sliceBigArray([...fetchActors], maxauthors) : [[...fetchActors]]
+    const actorslists = fetchActors.size > maxfetch ? sliceBigArray([...fetchActors], maxfetch) : [[...fetchActors]]
     // fetchedSet is where each promise will add newly fetched events
     const fetchedSet : Set<NostrEvent> = new Set()
     const promises : Promise<void>[] = []
 
-    console.log("GrapeRank : nostr interpreter : fetching events in ",authorslists.length, " requests for ",authors.size," actors")
-    // send one relay request per `maxauthors` sized list of authors
-    for(let index in authorslists){
+    console.log("GrapeRank : nostr interpreter : fetching events in ",actorslists.length, " requests for ",actors.size," actors")
+    // send one relay request per `maxfetch` sized list of actors
+    for(let index in actorslists){
       let fetchfilter : NostrFilter = {
         ...this.request?.filter, 
-        authors : authorslists[index] as string[],
-        kinds : this.kinds,
+        authors : actorslists[index] as string[],
+        kinds : this.fetchKinds,
       }
       // delay between relay requests
       await new Promise<void>((resolve)=>{
@@ -225,5 +220,3 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
 
 export type pubkey = string
 export type signature = string
-
-

@@ -253,7 +253,7 @@ class RankingCalculator {
     this._sums.products += weight * interaction.value
 
     // get the metadata entry for this interpreter
-    let rankedInteraction = this._interactions.get(interaction.interpId)
+    let rankedInteraction = this._interactions.get(interaction.interpreterId)
     // create new metadata entry for this protocol, using existing values as available
     rankedInteraction = { 
       // dos = the minimum nonzero iteration number for interactions used to calculate this ranknig 
@@ -268,7 +268,7 @@ class RankingCalculator {
       numRatedBy : (this.pov.includes(interaction.subject) ? 1 : 0) + (rankedInteraction?.numRatedBy || 0)
     }
     // assure that the metadata entry is updated for this interpreter, in case it was undefined before.
-    this._interactions.set(interaction.interpId, rankedInteraction)
+    this._interactions.set(interaction.interpreterId, rankedInteraction)
 
     // // DEBUG
     // if(this._subject == DEBUGTARGET){
@@ -292,7 +292,7 @@ class RankingCalculator {
     let {confidence, rank, interactions} = initRanking()
 
     // convert metadata map to pojo
-    this._interactions.forEach((ranknigmeta,interpId) => interactions[interpId] = ranknigmeta )
+    this._interactions.forEach((ranknigmeta,interpreter) => interactions[interpreter] = ranknigmeta )
 
     // If weights == 0 then confidence and rank will also be 0
     if(this._sums.weights > 0){

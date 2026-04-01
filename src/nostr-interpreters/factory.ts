@@ -1,27 +1,24 @@
-import { NostrInterpreterParams } from "./types";
+import { InterpreterParams } from "../types";
 import { NostrInterpreterClass, NostrInterpreterFactory } from "./classes";
-import { applyInteractionsByTag, applyHashtagInteractions, applyZapInteractions, validateEachEventHasAuthor } from "./callbacks";
+import { applyInteractionsByTag, applyZapInteractions, validateEachEventHasAuthor } from "./callbacks";
+import { NostrInterpreterParams } from "./types";
 
 export const InterpreterFactory = new NostrInterpreterFactory()
 
-InterpreterFactory.set('nostr-follows-3', () => new NostrInterpreterClass<FollowsParams>(
+interface FollowsParams extends NostrInterpreterParams {}
+InterpreterFactory.set('nostr-3', () => new NostrInterpreterClass<FollowsParams>(
   {
-    kinds : [3],
-    modes: [{
-      name: 'actor-follows-subject',
-      description: 'Interprets interactions where actor(s) follow subject(s).',
+    interpretKind: 3,
+    fetchKinds : [3],
+    label: "Follows Network",
+    description: 'Interprets follow events published by actors or subjects.',
+    allowedActorTypes: ['pubkey', 'p'],
+    allowedSubjectTypes: ['pubkey', 'p'],
+    defaultParams : {
+      value : 1,
+      confidence : .5,
       actorType: 'pubkey',
       subjectType: 'p'
-    },
-    {
-      name: 'subject-follows-actor',
-      description: 'Interprets interactions where subject(s) follow actor(s).',
-      actorType: 'p',
-      subjectType: 'pubkey'
-    }],
-    params : {
-      value : 1,
-      confidence : .5
     },
     validate : validateEachEventHasAuthor,
     interpret : (instance, fetchedIndex) => {
@@ -29,54 +26,51 @@ InterpreterFactory.set('nostr-follows-3', () => new NostrInterpreterClass<Follow
     }
   }
 ))
-interface FollowsParams extends NostrInterpreterParams {}
 
 
-InterpreterFactory.set('nostr-mutes-10000', () => new NostrInterpreterClass<MutesParams>(
+interface MutesParams extends NostrInterpreterParams {}
+InterpreterFactory.set('nostr-10000', () => new NostrInterpreterClass<MutesParams>(
   {
-    kinds : [10000],
-    modes: [{
-      name: 'actor-mutes-subject',
-      description: 'Interprets interactions where actor(s) mute subject(s).',
+    interpretKind: 10000,
+    fetchKinds : [10000],
+    label: "Mutes Network",
+    description: 'Interprets mutes events published by actors or subjects.',
+    allowedActorTypes: ['pubkey', 'p'],
+    allowedSubjectTypes: ['pubkey', 'p'],
+    defaultParams : {
+      value : 0,
+      confidence : .5,
       actorType: 'pubkey',
       subjectType: 'p'
-    },
-    {
-      name: 'subject-mutes-actor',
-      description: 'Interprets interactions where subject(s) mute actor(s).',
-      actorType: 'p',
-      subjectType: 'pubkey'
-    }],
-    params : {
-      value : 0,
-      confidence : .5
     },
     interpret : (instance, fetchedIndex) => {
       return applyInteractionsByTag(instance as NostrInterpreterClass<MutesParams>, fetchedIndex)
     }
   }
 ))
-interface MutesParams extends NostrInterpreterParams {}
 
-
-InterpreterFactory.set('nostr-reports-1984', () => new NostrInterpreterClass<ReportsParams>(
+interface ReportsParams extends NostrInterpreterParams {
+  nudity : number
+  malware : number
+  profanity : number
+  illegal : number
+  spam : number
+  impersonation : number
+  other : number
+}
+InterpreterFactory.set('nostr-1984', () => new NostrInterpreterClass<ReportsParams>(
   {
-    kinds : [1984],
-    modes: [{
-      name: 'actor-reports-subject',
-      description: 'Interprets interactions where actor(s) report subject(s).',
-      actorType: 'pubkey',
-      subjectType: 'p'
-    },
-    {
-      name: 'subject-reports-actor',
-      description: 'Interprets interactions where subject(s) report actor(s).',
-      actorType: 'p',
-      subjectType: 'pubkey'
-    }],
-    params : {
+    interpretKind: 1984,
+    fetchKinds : [1984],
+    label: "Reports Network",
+    description: 'Interprets report events published by actors or subjects.',
+    allowedActorTypes: ['pubkey', 'p'],
+    allowedSubjectTypes: ['pubkey', 'p'],
+    defaultParams : {
       value : 0,
       confidence : .5,
+      actorType: 'pubkey',
+      subjectType: 'p',
       nudity : 0,
       malware : 0,
       profanity : 0,
@@ -90,61 +84,46 @@ InterpreterFactory.set('nostr-reports-1984', () => new NostrInterpreterClass<Rep
     }
   }
 ))
-interface ReportsParams extends NostrInterpreterParams {
-  confidence : number,
-  nudity : number,
-  malware : number,
-  profanity : number,
-  illegal : number,
-  spam : number,
-  impersonation : number,
-  other : number,
-}
 
-
-InterpreterFactory.set('nostr-hashtags-1', () => new NostrInterpreterClass<HashtagParams>(
+interface HashtagParams extends NostrInterpreterParams {}
+InterpreterFactory.set('nostr-1-t', () => new NostrInterpreterClass<HashtagParams>(
   {
-    kinds : [1],
-    modes: [{
-      name: 'event-is-tagged',
-      description: 'Interprets interactions where event(s) have hashtag(s).',
+    interpretKind: 1,
+    fetchKinds : [1],
+    label: "Hashtag Network",
+    description: 'Interprets hashtag occurences in kind 1 notes.',
+    allowedActorTypes: ['id'],
+    allowedSubjectTypes: ['t'],
+    defaultParams : {
+      value : 1,
+      confidence : .5,
       actorType: 'id',
       subjectType: 't'
-    }],
-    params : {
-      value : 1,
-      confidence : .5
     },
     interpret : (instance, fetchedIndex) => {
-      return applyHashtagInteractions(instance as NostrInterpreterClass<HashtagParams>, fetchedIndex)
+      return applyInteractionsByTag(instance as NostrInterpreterClass<HashtagParams>, fetchedIndex)
     }
   }
 ))
-interface HashtagParams extends NostrInterpreterParams {}
 
 
-InterpreterFactory.set('nostr-zaps-9735', () => new NostrInterpreterClass<ZapParams>(
+interface ZapParams extends NostrInterpreterParams {}
+InterpreterFactory.set('nostr-9735', () => new NostrInterpreterClass<ZapParams>(
   {
-    kinds : [9735],
-    modes: [{
-      name: 'actor-zaps-subject',
-      description: 'Interprets interactions where actors(s) [P tag] zap subject(s) [p tag].',
+    interpretKind: 9735,
+    fetchKinds : [9735, 9734],
+    label: "Zap Network",
+    description: 'Interprets zap reciepts from zap requests published by actors or subjects.',
+    allowedActorTypes: ['P', 'p'],
+    allowedSubjectTypes: ['P', 'p'],
+    defaultParams : {
+      value : 1,
+      confidence : .5,
       actorType: 'P',
       subjectType: 'p'
-    },
-    {
-      name: 'subject-zaps-actor',
-      description: 'Interprets interactions where subject(s) [P tag] zap actor(s) [p tag].',
-      actorType: 'p',
-      subjectType: 'P'
-    }],
-    params : {
-      value : 1,
-      confidence : .5
     },
     interpret : (instance, fetchedIndex) => {
       return applyZapInteractions(instance as NostrInterpreterClass<ZapParams>, fetchedIndex)
     }
   }
 ))
-interface ZapParams extends NostrInterpreterParams {}
