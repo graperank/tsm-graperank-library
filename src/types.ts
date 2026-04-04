@@ -53,6 +53,9 @@ export type CalculatorIterationStatus = Record<
 
 export type RankingsEntry = [subjectId, RankingData]
 
+export type UnrankedPov = string | string[]  
+export type RankedPov = [string, number?][]
+
 // Interpreter ID 
 // is a kebab case stringification standard for identifying interpreter instances
 // they should start with a namespace in lowercase letters,
@@ -107,12 +110,13 @@ export type InteractionsMap = Map<actorId, Map<subjectId, InteractionData>>
 
 export type InterpretationInput = {
   type : povType,
-  pov : actorId[] | subjectId[],
+  pov : RankedPov | UnrankedPov,
   requests : InterpreterRequest<any>[],
 }
 export type InterpretationOutput = {
   interactions: InteractionsList
   responses: InterpreterResponse[]
+  pov: RankedPov
 }
 
 export type InterpreterStatus = {

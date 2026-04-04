@@ -3,6 +3,7 @@ import { Filter as NostrFilter } from 'nostr-tools/filter'
 import { SimplePool } from 'nostr-tools/pool'
 import { NostrTagType, NostrType } from './types'
 import { npubEncode } from 'nostr-tools/nip19'
+import { RankedPov, UnrankedPov } from '../types'
 
 const relays = [
   "wss://gv.rogue.earth",
@@ -73,9 +74,12 @@ function deduplicationKey(event: NostrEvent): string {
   if (
       event.kind === 0 ||
       event.kind === 3 ||
-      (event.kind && event.kind >= 10000 && event.kind < 20000)
+      (event.kind >= 10000 && event.kind < 20000)
   ) {
       return `${event.kind}:${event.pubkey}`;
+  } else if (event.kind >= 30000 && event.kind < 40000) {
+      const dTag = event.tags.find(tag => tag[0] === 'd')?.[1] || '';
+      return `${event.kind}:${event.pubkey}:${dTag}`;
   } else {
       return event.id;
   }
@@ -92,7 +96,7 @@ export function sliceBigArray<T>(array: T[], chunkSize: number): T[][] {
 
 // Actors are always EITHER event types or pubkey types
 export function getEventActor(actorType : NostrType, event : NostrEvent) : string | undefined {
-  if(!actorType || !PubkeyTypes.includes(actorType) || !EventTypes.includes(actorType)) return
+  if(!actorType || (!PubkeyTypes.includes(actorType) && !EventTypes.includes(actorType))) return
   return getEventSubject(actorType, event)
 }
 
@@ -128,3 +132,21 @@ export function validatePubkey(pubkey : string){
   }
   return true
 }
+
+  // Helper to convert all POV formats to RankedPov format
+  export function normalizePov(pov: RankedPov | UnrankedPov): RankedPov {
+    if (typeof pov === 'string') {
+      return [[pov]]
+    } else if (Array.isArray(pov)) {
+      if (pov.length === 0) {
+        return []
+      } else if (Array.isArray(pov[0])) {
+        // RankedPov format: [[actorId, rank], ...]
+        return pov as RankedPov
+      } else {
+        // UnrankedPov array format: [actorId, ...]
+        return pov.map(actorId => [actorId]) as RankedPov
+      }
+    }
+    return []
+  }

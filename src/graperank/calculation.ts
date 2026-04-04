@@ -1,11 +1,12 @@
-import type { CalculatorParams, CalculatorSums, subjectId, InterpreterId, Interaction, InteractionsList, Ranking, RankingData, WeightedInteractions, CalculatorIterationStatus, RankingsEntry, actorId } from "../types"
+import type { CalculatorParams, CalculatorSums, subjectId, InterpreterId, Interaction, InteractionsList, Ranking, RankingData, WeightedInteractions, CalculatorIterationStatus, RankingsEntry, actorId, RankedPov, UnrankedPov } from "../types"
+import { normalizePov } from "../nostr-interpreters/helpers"
 
 // var params : Required<CalculatorParams>
 
 export class CalculationController {
 
   constructor(
-    readonly pov : actorId[],
+    readonly pov : RankedPov,
     readonly interactions : InteractionsList,
     params? : Partial<CalculatorParams>,
     private updateStatus? : (newstatus : CalculatorIterationStatus) => Promise<void>,
@@ -48,14 +49,13 @@ export class CalculationController {
     // setup
     // STEP A : initialize subject ranknig
     // Retrieve or create a RankingCalculator for each subject in interactions
-    for(let r in this.interactions){
-      if(!this.interactions[r]) continue
-      let subject = this.interactions[r].subject
-      let rater = this.interactions[r].actor
+    for(let i = 0; i < this.interactions.length; i++){
+      const interaction = this.interactions[i]
+      if(!interaction) continue
+      const subject = interaction.subject
+      const rater = interaction.actor
       if(subject && !this.calculators.get(subject)){
-        // TODO get ranks for each rater from worldview input cards
-        // let ratercard = getInputScorecard(rater as string)
-        let calculator = new RankingCalculator( this.pov, subject , this.params)
+        const calculator = new RankingCalculator(this.pov, subject, this.params)
         if(calculator) this.calculators.set(subject, calculator)
       }
     }
@@ -93,12 +93,13 @@ export class CalculationController {
       
       // STEP B : calculate sums
       // Add actor's interaction to the sum of weights & products for the subject ranknig
-      for(let r in this.interactions){
-        if(!this.interactions[r]) continue
-        let calculator = this.calculators.get(this.interactions[r].subject)
-        let raterrank = this.calculators.get(this.interactions[r].actor as string)?.rank
+      for(let i = 0; i < this.interactions.length; i++){
+        const interaction = this.interactions[i]
+        if(!interaction) continue
+        const calculator = this.calculators.get(interaction.subject)
+        const raterrank = this.calculators.get(interaction.actor as string)?.rank
         if(calculator) {
-          calculator.sum( this.interactions[r], raterrank)
+          calculator.sum(interaction, raterrank)
         }
       }
 
@@ -171,7 +172,7 @@ export class CalculationController {
     })
     // sort first : ranknigs with higher ranks and most interactions
     return rankings.sort((a ,b )=>{
-      return  a[1].rank - b[1].rank ||  a[1].interactions['nostr-follows']?.numInteractions - b[1].interactions['nostr-follows']?.numInteractions 
+      return  a[1].rank - b[1].rank 
     })
   }
 
@@ -207,45 +208,50 @@ class RankingCalculator {
   }
 
   get dos() : number | undefined {
-    // TODO interpreter should designate a protocol that determines DOS
-    // using 'nostr-follows' for now
-    return this._interactions.get('nostr-follows')?.dos || 0
+    let minDos: number | undefined = undefined
+    
+    for (const interaction of this._interactions.values()) {
+      if (interaction.dos !== undefined) {
+        if (minDos === undefined || interaction.dos < minDos) {
+          minDos = interaction.dos
+        }
+      }
+    }
+    
+    return minDos
   }
 
   get rank() : number {
     return this._ranking?.rank || 0
   }
-  // constructor(subject : subjectId)
-  // constructor(ranknig : Ranking)
+
+  private povMap : Map<actorId, number | undefined>
+
   constructor(
-    readonly pov : actorId[], 
+    pov : RankedPov, 
     input : subjectId | Ranking, 
-    private params : Required<CalculatorParams>
+    private params : Required<CalculatorParams>,
   ){
       // input is subject of new ranknig
       this._subject = typeof input == 'string' ?  input :  input.subject as string
+      this.povMap = new Map(pov as [string, number | undefined][])
   }
 
   // STEP B : calculate sums
   // calculate sum of weights & sum of products
   sum( interaction : Interaction, raterrank ? : number){
-
-    // // do nothing if ratercard.subject does not match interaction.rater
-    // if(ratercard && ratercard.subject != interaction.rater){
-    //   console.log("GrapeRank : ScorecardCalculator : WARNING ratercard.subject does not match interaction.rater")
-    //   return
-    // }
-
-    // ALWAYS run calculater ... to assure rank convergence for "more distant" dos
-    // if(this.calculated) {
-    //   return
-    // }
-
     // determine rater influence
-    let influence = this.pov.includes(interaction.actor) ? 1 : raterrank || 0
+    // If actor is in POV, use their initial rank (or 1 if unranked)
+    // Otherwise, use their calculated rank from this iteration
+    let influence: number
+    if (this.povMap.has(interaction.actor)) {
+      influence = this.povMap.get(interaction.actor) ?? 1
+    } else {
+      influence = raterrank || 0
+    }
     let weight = influence * interaction.confidence; 
     // no attenuation for pov
-    if (!this.pov.includes(interaction.actor)) 
+    if (!this.povMap.has(interaction.actor)) 
       weight = weight * (this.params.attenuation);
 
     // add to sums
@@ -265,7 +271,7 @@ class RankingCalculator {
       // numInteractions = number of protocol interactions for this subject
       numInteractions : 1 + (rankedInteraction?.numInteractions || 0),
       // numRatedBy = number of protocol interactions for pov by this subject
-      numRatedBy : (this.pov.includes(interaction.subject) ? 1 : 0) + (rankedInteraction?.numRatedBy || 0)
+      numRatedBy : (this.povMap.has(interaction.subject) ? 1 : 0) + (rankedInteraction?.numRatedBy || 0)
     }
     // assure that the metadata entry is updated for this interpreter, in case it was undefined before.
     this._interactions.set(interaction.interpreterId, rankedInteraction)
@@ -320,22 +326,20 @@ class RankingCalculator {
   private _interactions : Map<InterpreterId<any>, WeightedInteractions> = new Map()
   // TODO refactor this._sums as this._input in the format of ranknig.input
   private _sums : CalculatorSums = {...zerosums}
-  private get _average(){ 
-    let average = 0
-    try{
-      average = this._sums.products / this._sums.weights
-    }catch(e){}
-    return average <= 0 ? 0 : average
+  private get _average(): number { 
+    if (this._sums.weights === 0) return 0
+    const average = this._sums.products / this._sums.weights
+    return isNaN(average) ? 0 : average
   }
   // STEP D : calculate confidence
-  private get confidence(){
-    // TODO get default rigor
-    let rigor = this.params.rigor !== undefined ? this.params.rigor : .25
+  private get confidence(): number {
+    // Clamp rigor to safe range to prevent NaN from log(0) or log(1)
+    const rigor = Math.max(0.001, Math.min(0.999, this.params.rigor ?? 0.25))
     const rigority = -Math.log(rigor)
     const fooB = -this._sums.weights * rigority
     const fooA = Math.exp(fooB)
-    const certainty = 1 - fooA
-    return certainty.toPrecision(4) as unknown as number // FIXME
+    const certainty = Math.max(0, Math.min(1, 1 - fooA))
+    return parseFloat(certainty.toPrecision(4))
   }
 
 }
@@ -356,9 +360,9 @@ function logRanksForIteration(calculators :  Map<subjectId,RankingCalculator>) :
     ranks = countRanknigsByRank(ranknigs, increment)
     // console.log("ranks counted", ranks)
 
-    for(let i in ranks){
+    for(let i = 0; i < ranks.length; i++){
       ov = v || "0"
-      v = ((i as unknown as number) * increment).toPrecision(2)
+      v = (i * increment).toPrecision(2)
       console.log("number of cards having ranks from "+ ov +" to " +v+ " = ", ranks[i])
     }
     return ranks

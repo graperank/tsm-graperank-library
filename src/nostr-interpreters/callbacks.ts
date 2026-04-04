@@ -38,7 +38,9 @@ export async function applyInteractionsByTag(instance : NostrInterpreterClass<No
     const actorInteractions = new Map<string, InteractionData>()
     eventindex ++
     
-    if(!!event.tags && event.tags.length < 10000){
+    // DoS prevention: Skip events with excessive tags (potential attack vector)
+    const MAX_TAGS_TO_PROCESS = 10000
+    if(event.tags && event.tags.length < MAX_TAGS_TO_PROCESS){
       for(let t in event.tags){
         let value : number = defaultValue
         let tag = event.tags[t]
@@ -78,13 +80,19 @@ export function validateEachEventHasAuthor( events : Set<NostrEvent>, authors : 
   return authorswithoutevents.length ? authorswithoutevents : true
 }
 
-export function validateOneEventIsNew( events : Set<NostrEvent>, authors : actorId[], previous? : Set<NostrEvent> ) : boolean | actorId[] { 
+export function validateOneEventIsNew( events : Set<NostrEvent>, authors : actorId[], previous? : Set<NostrEvent> ) : boolean { 
   if(!previous || !previous.size) return true
-  previous.forEach((pevent)=>{
-    events.forEach((newevent)=>{
-      if(pevent.id != newevent.id) return true
-    })
-  })
+  
+  for(const newevent of events) {
+    let isNew = true
+    for(const pevent of previous) {
+      if(pevent.id === newevent.id) {
+        isNew = false
+        break
+      }
+    }
+    if(isNew) return true
+  }
   return false
 }
 

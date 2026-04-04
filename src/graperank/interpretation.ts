@@ -1,5 +1,6 @@
-import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput } from "../types"
+import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput, RankedPov, UnrankedPov } from "../types"
 import type { Interpreter, InterpreterInitializer, InterpreterParams } from "../types"
+import { normalizePov } from "../nostr-interpreters/helpers"
 
 
 export class InterpretationController {
@@ -22,20 +23,23 @@ export class InterpretationController {
     const allActors : Map<actorId,number> = new Map()
     var requestActors : Set<actorId> | undefined
 
+    // Normalize POV to RankedPov format
+    const normalizedPov = normalizePov(pov)
+    const povActorIds = normalizePov(pov).map(([actorId]) => actorId)
+
     if(!!pov && !!requests){
-      console.log("GrapeRank : interpret : instantiating ",requests.length, " interpreters for ",pov.length," actors or subjects in pov")
+      console.log("GrapeRank : interpret : instantiating ",requests.length, " interpreters for ",povActorIds.length," actors or subjects in pov")
       console.log("----------------------------------")
       // loop through each interpreter request
       // requests having `iterations` will ADD to `allActors` with each interation
       // each request will use the `allActors` list from previous requests
-      for(let r in requests){
+      for(let requestindex = 0; requestindex < requests.length; requestindex++){
         if(this.stopping) return undefined
-        let requestindex = r as unknown as number
-        let request = requests[requestindex]
+        const request = requests[requestindex]
         this.interpreters.setRequest(request)
         // resolve actors from pov
         if(!actors) {
-          actors = await this.interpreters.resolveActors(request.id, type, pov)
+          actors = await this.interpreters.resolveActors(request.id, type, povActorIds)
           if(!actors) throw new Error("GrapeRank : interpret : failed to resolve pov")
           // add input actors to allActors
           actors.forEach((actorId) => allActors.set(actorId,0))
@@ -128,7 +132,7 @@ export class InterpretationController {
         }
 
         // add the final map of currentInteractions to interactions list
-        addToInteractionsList(request.id, r as unknown as number, currentInteractions, outputInteractions)
+        addToInteractionsList(request.id, requestindex, currentInteractions, outputInteractions)
       }
       // // DEBUG duplicate ratings
       // let numtargetratings : Map<actorId,number> = new Map()
@@ -147,7 +151,7 @@ export class InterpretationController {
       console.log('GrapeRank : ERROR in interpret() : no actorts && requests passed : ', actors, requests)
     }
     this.interpreters.clear()
-    return {interactions: outputInteractions, responses: outputResponses}
+    return {interactions: outputInteractions, responses: outputResponses, pov: normalizedPov}
 
   }
 
