@@ -13,7 +13,7 @@ import { UnsignedEvent, ServiceAnnouncementConfig } from './types'
  */
 
 export const TSM_OUTPUT_KIND = '37573'
-export const TSM_GRAPERANK_NIP = 'https://github.com/graperank/tsm-nip'
+export const TSM_GRAPERANK_NIP = 'https://github.com/graperank/tsm-graperank-nip'
 
 
 export function getAllowedSubjectTypes(): string[] {
