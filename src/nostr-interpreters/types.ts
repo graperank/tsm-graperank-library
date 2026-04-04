@@ -1,4 +1,4 @@
-import { NostrEvent } from "nostr-tools/core"
+import { NostrEvent } from "../lib/nostr-tools"
 import { InterpreterParams, Interpreter, InterpreterId, InteractionsMap, actorId, InterpreterInitializer } from "../graperank/types"
 import { NostrInterpreterClass } from "./classes"
 

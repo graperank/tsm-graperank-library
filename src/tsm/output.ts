@@ -1,4 +1,4 @@
-import { NostrEvent } from 'nostr-tools/core'
+import { NostrEvent } from '../lib/nostr-tools'
 import { InterpretationController, InterpretersMap } from '../graperank/interpretation'
 import { CalculationController } from '../graperank/calculation'
 import { InterpreterFactory } from '../nostr-interpreters/factory'

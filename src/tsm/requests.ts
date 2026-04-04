@@ -1,4 +1,4 @@
-import { NostrEvent } from 'nostr-tools/core'
+import { NostrEvent } from '../lib/nostr-tools'
 import { InterpretationInput, InterpreterRequest, CalculatorParams, povType, UnrankedPov } from '../graperank/types'
 
 /**

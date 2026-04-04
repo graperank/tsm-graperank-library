@@ -1,8 +1,5 @@
-import { Event as NostrEvent } from 'nostr-tools/core'
-import { Filter as NostrFilter } from 'nostr-tools/filter'
-import { SimplePool } from 'nostr-tools/pool'
+import { NostrEvent, NostrFilter, SimplePool, npubEncode } from '../lib/nostr-tools'
 import { NostrTagType, NostrType } from './types'
-import { npubEncode } from 'nostr-tools/nip19'
 import { RankedPov, UnrankedPov } from '../graperank/types'
 
 const relays = [

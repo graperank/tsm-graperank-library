@@ -1,8 +1,4 @@
-import { Event as NostrEvent} from 'nostr-tools/core'
-import { Filter as NostrFilter} from 'nostr-tools/filter'
-import { npubEncode, decode } from 'nostr-tools/nip19'
-import { SimplePool } from 'nostr-tools/pool'
-import { useWebSocketImplementation } from 'nostr-tools/pool'
+import { NostrEvent, NostrFilter, npubEncode, decode, SimplePool, useWebSocketImplementation } from '../lib/nostr-tools'
 import { subjectId, Interpreter, InterpreterRequest, InteractionsMap, actorId, InterpreterInitializer, InterpreterParams, InterpreterId, InteractionData, povType } from "../graperank/types"
 import { NostrInterpreterClassConfig, NostrInterpreterId, NostrInterpreterKeys, NostrInterpreterParams, NostrType } from "./types"
 import { applyInteractionsByTag } from "./callbacks"
