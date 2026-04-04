@@ -1,4 +1,4 @@
-import { NostrEvent} from 'nostr-tools/core'
+import { NostrEvent } from '../lib/nostr-tools'
 import { InterpreterRequest } from '../graperank/types'
 // Unsigned event type = NostrEvent - `sig` and `id`
 export type UnsignedEvent = Omit<NostrEvent, 'sig' | 'id' | 'pubkey'>
