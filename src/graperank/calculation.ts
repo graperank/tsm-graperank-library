@@ -1,4 +1,4 @@
-import type { CalculatorParams, CalculatorSums, subjectId, InterpreterId, Interaction, InteractionsList, Ranking, RankingData, WeightedInteractions, CalculatorIterationStatus, RankingsEntry, actorId, RankedPov, UnrankedPov } from "../types"
+import type { CalculatorParams, CalculatorSums, subjectId, InterpreterId, Interaction, InteractionsList, Ranking, RankingData, WeightedInteractions, CalculatorIterationStatus, RankingsEntry, actorId, RankedPov, UnrankedPov } from "./types"
 import { normalizePov } from "../nostr-interpreters/helpers"
 
 // var params : Required<CalculatorParams>

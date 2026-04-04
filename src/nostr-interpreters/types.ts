@@ -1,5 +1,5 @@
 import { NostrEvent } from "nostr-tools/core"
-import { InterpreterParams, Interpreter, InterpreterId, InteractionsMap, actorId, InterpreterInitializer } from "../types"
+import { InterpreterParams, Interpreter, InterpreterId, InteractionsMap, actorId, InterpreterInitializer } from "../graperank/types"
 import { NostrInterpreterClass } from "./classes"
 
 export type NostrEventField = 'id' | 'pubkey' | 'kind'

@@ -1,4 +1,4 @@
-import { InterpreterParams } from "../types";
+import { InterpreterParams } from "../graperank/types";
 import { NostrInterpreterClass, NostrInterpreterFactory } from "./classes";
 import { applyInteractionsByTag, applyZapInteractions, validateEachEventHasAuthor } from "./callbacks";
 import { NostrInterpreterParams } from "./types";

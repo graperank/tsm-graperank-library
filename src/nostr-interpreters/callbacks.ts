@@ -1,5 +1,5 @@
 import { Event as NostrEvent } from 'nostr-tools/core'
-import { InteractionsMap, InteractionData, actorId, subjectId } from "../types"
+import { InteractionsMap, InteractionData, actorId, subjectId } from "../graperank/types"
 import { NostrInterpreterClass } from "./classes"
 import { NostrInterpreterParams, NostrType } from './types'
 import { getEventActor, getEventSubject, validatePubkey } from './helpers'

@@ -3,7 +3,7 @@ import { Filter as NostrFilter } from 'nostr-tools/filter'
 import { SimplePool } from 'nostr-tools/pool'
 import { NostrTagType, NostrType } from './types'
 import { npubEncode } from 'nostr-tools/nip19'
-import { RankedPov, UnrankedPov } from '../types'
+import { RankedPov, UnrankedPov } from '../graperank/types'
 
 const relays = [
   "wss://gv.rogue.earth",

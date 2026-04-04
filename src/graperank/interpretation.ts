@@ -1,5 +1,5 @@
-import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput, RankedPov, UnrankedPov } from "../types"
-import type { Interpreter, InterpreterInitializer, InterpreterParams } from "../types"
+import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput, RankedPov, UnrankedPov } from "./types"
+import type { Interpreter, InterpreterInitializer, InterpreterParams } from "./types"
 import { normalizePov } from "../nostr-interpreters/helpers"
 
 
