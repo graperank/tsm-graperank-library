@@ -10,7 +10,7 @@ TSM GrapeRank allows anyone to set up a sovereignty-respecting recommendation an
 
 This library is a complete rewrite that adds:
 
-- **📋 TSM Specification Compliance**: Standardized service announcements (kind 37570), service requests (kind 37572), and ranking outputs (kind 37573)
+- **📋 Compliance with [TSM Specification](https://nostrhub.io/naddr1qvzqqqrcvypzphm8lxn7gyf9w3wtu7k0hhxsx6ghsrry8hmm44c0t5ss3uk5lssqqy28wumn8ghj7un9d3shjtnyv9kh2uewd9hsqxn5wdkj6arjw4ehgttnv4e8v6trv5kk6ctrdp5kuetnl84x4n)**: Standardized service announcements (kind 37570), service requests (kind 37572), and ranking outputs (kind 37573)
 - **🔌 Full Interoperability**: Works seamlessly with any TSM-compatible client or service
 - **🧩 Enhanced Modularity**: Clean separation between TSM protocol layer, GrapeRank engine, and interpreter implementations
 - **✅ Comprehensive Testing**: Full test coverage with unit, integration, and execution tests
@@ -236,6 +236,7 @@ MIT
 
 **Related Projects:**
 - [Original GrapeRank Library](https://github.com/Pretty-Good-Freedom-Tech/graperank-nodejs) (deprecated)
-- [Grapevine Client Demo](https://github.com/Pretty-Good-Freedom-Tech/grapevine-client)
-- [My Grapevine](https://grapevine.my) - Live demo
+- [GrapeRank TSM NIP](https://github.com/graperank/tsm-graperank-nip)
+- [TSM Ranking Services Nip](https://nostrhub.io/naddr1qvzqqqrcvypzphm8lxn7gyf9w3wtu7k0hhxsx6ghsrry8hmm44c0t5ss3uk5lssqqy28wumn8ghj7un9d3shjtnyv9kh2uewd9hsq9r5wdkj6unpde4kjmn894ek2unkd93k2ucqkht0d)
+- [Trust Service Machines (TSM)](https://nostrhub.io/naddr1qvzqqqrcvypzphm8lxn7gyf9w3wtu7k0hhxsx6ghsrry8hmm44c0t5ss3uk5lssqqy28wumn8ghj7un9d3shjtnyv9kh2uewd9hsqxn5wdkj6arjw4ehgttnv4e8v6trv5kk6ctrdp5kuetnl84x4n)
 
