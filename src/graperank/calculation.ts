@@ -317,7 +317,7 @@ class RankingCalculator {
   private _calculated : boolean | undefined
   private _subject : subjectId 
   private _ranking : Required<RankingData> = initRanking()
-  private _interactions : Map<InterpreterId, WeightedInteractions> = new Map()
+  private _interactions : Map<InterpreterId<any>, WeightedInteractions> = new Map()
   // TODO refactor this._sums as this._input in the format of ranknig.input
   private _sums : CalculatorSums = {...zerosums}
   private get _average(){ 

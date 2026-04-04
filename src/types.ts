@@ -1,5 +1,6 @@
 export type actorId = string
 export type subjectId = string
+export type povType = string
 export type dos = number
 export type lowercase = Lowercase<string>
 export type ParamValue = string | number | boolean
@@ -69,7 +70,7 @@ export type InterpreterParams = {
 }
 
 export type InterpreterRequest<ParamsType> = {
-  interpreterId: InterpreterId<any>
+  id: InterpreterId<any>
   params?: ParamsType
   iterate?: number
   filter?: ParamsObject
@@ -104,7 +105,12 @@ export type InteractionsList = Interaction[]
 
 export type InteractionsMap = Map<actorId, Map<subjectId, InteractionData>>
 
-export type InterpretationResults = {
+export type InterpretationInput = {
+  type : povType,
+  pov : actorId[] | subjectId[],
+  requests : InterpreterRequest<any>[],
+}
+export type InterpretationOutput = {
   interactions: InteractionsList
   responses: InterpreterResponse[]
 }
@@ -128,8 +134,18 @@ export interface Interpreter<ParamsType extends InterpreterParams> {
   params: ParamsType // default parameters
   readonly fetched: Set<any>[]
   readonly interactions: InteractionsMap
-  discoveredActors?: Set<actorId>
-  fetchData(this: Interpreter<ParamsType>, actors?: Set<actorId>, subjects?: Set<subjectId>): Promise<number>
+  // resolveActors() should return a set of actor ids
+  // from a given `type` and `pov` OR from the interpreter's latest iteration of fetched data.
+  // It should validate that `type` corresponds to a supported actor or subject type 
+  // AND that `pov` is a string or an array of strings of `type` format
+  // OR some interpreter specific reference to a collection of `type` formated strings
+  // It should parse these `type` formatted strings and return a set of actor ids.
+  resolveActors(type?: povType, pov?: string | string[]): Promise<Set<actorId> | undefined>
+  // fetchData() fetches data from the network
+  // This will be called once per interpreter iteration 
+  // to fetch interactions initiated by the given actors
+  fetchData(this: Interpreter<ParamsType>, actors?: Set<actorId>): Promise<number>
+  // interpret() interprets the fetched data
   interpret(this: Interpreter<ParamsType>, fetchedIndex?: number): Promise<InteractionsMap | undefined>
 }
 

@@ -1,8 +1,9 @@
 import { Event as NostrEvent} from 'nostr-tools/core'
 import { Filter as NostrFilter} from 'nostr-tools/filter'
+import { npubEncode, decode } from 'nostr-tools/nip19'
 import { SimplePool } from 'nostr-tools/pool'
 import { useWebSocketImplementation } from 'nostr-tools/pool'
-import { subjectId, Interpreter, InterpreterRequest, InteractionsMap, actorId, InterpreterInitializer, InterpreterParams, InterpreterId, InteractionData } from "../types"
+import { subjectId, Interpreter, InterpreterRequest, InteractionsMap, actorId, InterpreterInitializer, InterpreterParams, InterpreterId, InteractionData, povType } from "../types"
 import { NostrInterpreterClassConfig, NostrInterpreterId, NostrInterpreterKeys, NostrInterpreterParams, NostrType } from "./types"
 import { applyInteractionsByTag } from "./callbacks"
 import { fetchEvents, sliceBigArray, maxfetch } from "./helpers"
@@ -62,7 +63,6 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   readonly fetchKinds : number[]
   readonly allowedActorTypes: string[]
   readonly allowedSubjectTypes: string[]
-  discoveredActors? : Set<actorId>
   request? : InterpreterRequest<ParamsType>
   private defaultParams : ParamsType
   get params(){ 
@@ -75,6 +75,7 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   validate? : 
   (events : Set<NostrEvent>, authors : actorId[], previous? : Set<NostrEvent>) 
   => boolean | actorId[]
+  private customResolveActors? : (instance : any) => Promise<Set<actorId>>
 
   constructor(config: NostrInterpreterClassConfig<ParamsType>){
     this.interpreterId = constructNostrInterpreterID({kind: config.interpretKind})
@@ -85,15 +86,16 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     this.allowedSubjectTypes = config.allowedSubjectTypes
     this.defaultParams = config.defaultParams
     this.validate = config.validate
+    this.customResolveActors = config.resolveActors
     
     this.interpret = async (dos? : number) => {
-      if(!this.fetched.length) throw('GrapeRank : '+this.request?.interpreterId+' interpreter interpret() : ERROR : NO EVENTS FETCHED PRIOR TO INTERPRET')
+      if(!this.fetched.length) throw('GrapeRank : '+this.request?.id+' interpreter interpret() : ERROR : NO EVENTS FETCHED PRIOR TO INTERPRET')
       // use the set of fetched events at fetchedIndex or LAST index
       dos = dos || this.fetched.length
       let fetchedIndex = dos - 1
       
       let result : InteractionsMap | undefined
-      console.log("GrapeRank : ",this.request?.interpreterId," interpreter : interpreting " ,this.fetched[fetchedIndex].size, " events fetched in iteration ", dos)
+      console.log("GrapeRank : ",this.request?.id," interpreter : interpreting " ,this.fetched[fetchedIndex].size, " events fetched in iteration ", dos)
       // interpret newInteractions via defined callback or default
       if(config.interpret) {
         result = await config.interpret(this, dos) 
@@ -122,33 +124,106 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
         }
       })
 
-      console.log("GrapeRank : ",this.request?.interpreterId," interpreter : merged iteration ",dos," into total interpreted : ", numInteractionsMerged ," new interactions and ",numInteractionsDuplicate," duplicate interactions from ",newInteractions.size," authors")
+      console.log("GrapeRank : ",this.request?.id," interpreter : merged iteration ",dos," into total interpreted : ", numInteractionsMerged ," new interactions and ",numInteractionsDuplicate," duplicate interactions from ",newInteractions.size," authors")
 
       return result
     }
   }
 
+
+  // resolveActors() returns a set of actor ids supported by this interpreter
+  // from a given `type` and `pov` OR from the latest iteration of fetched data.
+  // It validates that `type` corresponds to a allowedActorType or allowedSubjectType 
+  // AND that `pov` is a string or an array of strings of `type` format
+  // OR a naddr reference to an event with `type` tags
+  // It parses these `type` formatted strings and returns a set of actor ids.
+  // Actor IDs should always be strings in a format compatible with the requested `actorType`
+  async resolveActors(type?: povType, pov?: string | string[]):Promise<Set<actorId>>{
+    const actors: Set<actorId> = new Set()
+    
+    if(type && pov) {
+      if(!this.allowedActorTypes.includes(type as NostrType) && !this.allowedSubjectTypes.includes(type as NostrType)) {
+        throw new Error(`GrapeRank : ${this.interpreterId} : resolveActors : type '${type}' not allowed`)
+      }
+      
+      const povArray = Array.isArray(pov) ? pov : [pov]
+      
+      for(const povItem of povArray) {
+        try {
+          if(povItem.startsWith('naddr')) {
+            const decoded = decode(povItem)
+            if(decoded.type === 'naddr') {
+              const { kind, pubkey, identifier } = decoded.data
+              const filter: NostrFilter = {
+                kinds: [kind],
+                authors: [pubkey],
+                '#d': identifier ? [identifier] : undefined
+              }
+              const events = await fetchEvents(filter)
+              for(const event of events) {
+                for(const tag of event.tags) {
+                  if(tag[0] === type && tag[1]) {
+                    actors.add(tag[1])
+                  }
+                }
+              }
+            }
+          } else if(type === 'pubkey' || type === 'p' || type === 'P') {
+            if(povItem.startsWith('npub')) {
+              const decoded = decode(povItem)
+              if(decoded.type === 'npub') {
+                actors.add(decoded.data as string)
+              }
+            } else {
+              actors.add(povItem)
+            }
+          } else {
+            actors.add(povItem)
+          }
+        } catch(e) {
+          console.log(`GrapeRank : ${this.interpreterId} : resolveActors : failed to parse POV item '${povItem}':`, e)
+        }
+      }
+    } else {
+      if(this.customResolveActors) {
+        return await this.customResolveActors(this)
+      }
+      
+      if(!this.fetched.length) return actors
+      
+      const latestFetched = this.fetched[this.fetched.length - 1]
+      const subjectType = this.params.subjectType as NostrType
+      
+      if(!subjectType) return actors
+      
+      for(const event of latestFetched) {
+        if(subjectType === 'pubkey') {
+          actors.add(event.pubkey)
+        } else if(subjectType === 'id') {
+          actors.add(event.id)
+        } else {
+          for(const tag of event.tags) {
+            if(tag[0] === subjectType && tag[1]) {
+              actors.add(tag[1])
+            }
+          }
+        }
+      }
+    }
+    
+    return actors
+  }
+
   // breaks up a large actors list into multiple actors lists 
   // suitable for relay requests, and sends them all in parallel
   // returns a single promise that is resolved when all fetches are complete.
-  async fetchData(actors? : Set<actorId>, subjects? : Set<subjectId>) : Promise<number> {
-    this.discoveredActors = new Set()
-    
-    const fetchActors = new Set<actorId>()
-    if(actors) actors.forEach(a => fetchActors.add(a))
-    
-    if(subjects) {
-      subjects.forEach(s => {
-        fetchActors.add(s)
-        this.discoveredActors!.add(s)
-      })
-    }
-    if(!fetchActors.size) return 0
+  async fetchData(actors? : Set<actorId>) : Promise<number> {
+    // get actors from request if not provided
     if(!this.request) throw('no request set for this interpreter')
     actors = actors || new Set(this.request?.actors)
     // actorslists is actors broken into an array of list, 
     // where each list is maximum size allowed for relay requests
-    const actorslists = fetchActors.size > maxfetch ? sliceBigArray([...fetchActors], maxfetch) : [[...fetchActors]]
+    const actorslists = actors.size > maxfetch ? sliceBigArray([...actors], maxfetch) : [[...actors]]
     // fetchedSet is where each promise will add newly fetched events
     const fetchedSet : Set<NostrEvent> = new Set()
     const promises : Promise<void>[] = []

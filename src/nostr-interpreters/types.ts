@@ -1,5 +1,6 @@
 import { NostrEvent } from "nostr-tools/core"
 import { InterpreterParams, Interpreter, InterpreterId, InteractionsMap, actorId, InterpreterInitializer } from "../types"
+import { NostrInterpreterClass } from "./classes"
 
 export type NostrEventField = 'id' | 'pubkey' | 'kind'
 
@@ -38,7 +39,7 @@ export type NostrInterpreterParams = InterpreterParams & {
   subjectType: NostrType // event tag or field for interaction subjects
 }
 
-export type NostrInterpreterClassConfig<ParamsType extends InterpreterParams> = {
+export type NostrInterpreterClassConfig<ParamsType extends NostrInterpreterParams> = {
   interpretKind: number,
   label: string,
   description: string,
@@ -47,9 +48,12 @@ export type NostrInterpreterClassConfig<ParamsType extends InterpreterParams> = 
   allowedSubjectTypes : NostrType[],
   defaultParams : ParamsType,
   interpret? : 
-    (instance : Interpreter<ParamsType>, dos : number) 
+    (instance : NostrInterpreterClass<ParamsType>, dos : number) 
     => Promise<InteractionsMap | undefined>,
   validate? : 
     (events : Set<NostrEvent>, authors : actorId[], previous? : Set<NostrEvent>) 
     => boolean | actorId[],
+  resolveActors? : 
+    (instance : NostrInterpreterClass<ParamsType>) 
+    => Promise<Set<actorId>>,
 }

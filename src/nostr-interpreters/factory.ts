@@ -22,7 +22,7 @@ InterpreterFactory.set('nostr-3', () => new NostrInterpreterClass<FollowsParams>
     },
     validate : validateEachEventHasAuthor,
     interpret : (instance, fetchedIndex) => {
-      return applyInteractionsByTag(instance as NostrInterpreterClass<FollowsParams>, fetchedIndex)
+      return applyInteractionsByTag(instance, fetchedIndex)
     }
   }
 ))
@@ -44,7 +44,7 @@ InterpreterFactory.set('nostr-10000', () => new NostrInterpreterClass<MutesParam
       subjectType: 'p'
     },
     interpret : (instance, fetchedIndex) => {
-      return applyInteractionsByTag(instance as NostrInterpreterClass<MutesParams>, fetchedIndex)
+      return applyInteractionsByTag(instance, fetchedIndex)
     }
   }
 ))
@@ -80,7 +80,7 @@ InterpreterFactory.set('nostr-1984', () => new NostrInterpreterClass<ReportsPara
       other : 0,
     },
     interpret : (instance, fetchedIndex) => {
-      return applyInteractionsByTag(instance as NostrInterpreterClass<ReportsParams>, fetchedIndex, 'p', 1, 2)
+      return applyInteractionsByTag(instance, fetchedIndex, instance.request!.params!.subjectType, 1, 2)
     }
   }
 ))
@@ -92,16 +92,31 @@ InterpreterFactory.set('nostr-1-t', () => new NostrInterpreterClass<HashtagParam
     fetchKinds : [1],
     label: "Hashtag Network",
     description: 'Interprets hashtag occurences in kind 1 notes.',
-    allowedActorTypes: ['id'],
+    allowedActorTypes: ['pubkey'],
     allowedSubjectTypes: ['t'],
     defaultParams : {
       value : 1,
       confidence : .5,
-      actorType: 'id',
+      actorType: 'pubkey',
       subjectType: 't'
     },
     interpret : (instance, fetchedIndex) => {
-      return applyInteractionsByTag(instance as NostrInterpreterClass<HashtagParams>, fetchedIndex)
+      return applyInteractionsByTag(instance, fetchedIndex)
+    },
+    resolveActors: async (instance) => {
+      const actors: Set<string> = new Set()
+      if(!instance.fetched.length) return actors
+      
+      const latestFetched = instance.fetched[instance.fetched.length - 1]
+      for(const event of latestFetched) {
+        actors.add(event.pubkey)
+        for(const tag of event.tags) {
+          if((tag[0] === 'p' || tag[0] === 'P') && tag[1]) {
+            actors.add(tag[1])
+          }
+        }
+      }
+      return actors
     }
   }
 ))
@@ -123,7 +138,7 @@ InterpreterFactory.set('nostr-9735', () => new NostrInterpreterClass<ZapParams>(
       subjectType: 'p'
     },
     interpret : (instance, fetchedIndex) => {
-      return applyZapInteractions(instance as NostrInterpreterClass<ZapParams>, fetchedIndex)
+      return applyZapInteractions(instance, fetchedIndex)
     }
   }
 ))

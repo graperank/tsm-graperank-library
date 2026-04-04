@@ -1,4 +1,4 @@
-import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpretationResults, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase } from "../types"
+import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput } from "../types"
 import type { Interpreter, InterpreterInitializer, InterpreterParams } from "../types"
 
 
@@ -11,10 +11,9 @@ export class InterpretationController {
   stop(){
     this.stopping = true
   }
-  async interpret(
-    actors : actorId[],
-    requests : InterpreterRequest<any>[],
-  ) : Promise<InterpretationResults | undefined>{
+  async interpret(input : InterpretationInput) : Promise<InterpretationOutput | undefined>{
+    const { type, pov, requests } = input
+    let actors : Set<actorId> | undefined
     var outputResponses : InterpreterResponse[] = []
     var outputInteractions : InteractionsList = []
     // `allActors` map keys hold all actors added as input and between protocol requests
@@ -23,12 +22,9 @@ export class InterpretationController {
     const allActors : Map<actorId,number> = new Map()
     var requestActors : Set<actorId> | undefined
 
-    if(!!actors && !!requests){
-      console.log("GrapeRank : interpret : instantiating ",requests.length, " protocols for ",actors.length," actors")
+    if(!!pov && !!requests){
+      console.log("GrapeRank : interpret : instantiating ",requests.length, " interpreters for ",pov.length," actors or subjects in pov")
       console.log("----------------------------------")
-      // add input actors to allActors
-      actors.forEach((actorId) => allActors.set(actorId,0))
-
       // loop through each interpreter request
       // requests having `iterations` will ADD to `allActors` with each interation
       // each request will use the `allActors` list from previous requests
@@ -37,9 +33,16 @@ export class InterpretationController {
         let requestindex = r as unknown as number
         let request = requests[requestindex]
         this.interpreters.setRequest(request)
+        // resolve actors from pov
+        if(!actors) {
+          actors = await this.interpreters.resolveActors(request.id, type, pov)
+          if(!actors) throw new Error("GrapeRank : interpret : failed to resolve pov")
+          // add input actors to allActors
+          actors.forEach((actorId) => allActors.set(actorId,0))
+        }
         // reset newActors, currentInteractions, and newInteractions 
         // between interpreter requests
-        const currentInteractions = this.interpreters.getInteractions(request.interpreterId) || new Map()
+        const currentInteractions = this.interpreters.getInteractions(request.id) || new Map()
         let newActors : Set<actorId> = new Set()
         let newInteractions : InteractionsMap | undefined
         let currentSubjects : Set<subjectId> | undefined
@@ -49,39 +52,39 @@ export class InterpretationController {
         if(request.actors && request.actors.length) requestActors = new Set(request.actors)
         
         let interpreterStatus : InterpreterStatus
-        console.log("GrapeRank : interpret : calling " +request.interpreterId +" protocol with params : ",this.interpreters.get(request.interpreterId)?.params)
+        console.log("GrapeRank : interpret : calling " +request.id +" protocol with params : ",this.interpreters.get(request.id)?.params)
 
         while(currentIteration < maxIterations){
           if(this.stopping) return undefined
-          // increment for each protocol iteration
+          // increment for each interpreter iteration
           currentIteration ++
           currentActors = requestActors || ( newActors?.size ?  newActors : new Set(allActors.keys()) )
-          console.log("GrapeRank : interpret : "+request.interpreterId +" protocol : begin iteration ", currentIteration, " of ", maxIterations,", with ",currentActors?.size," actors")
+          console.log("GrapeRank : interpret : "+request.id +" protocol : begin iteration ", currentIteration, " of ", maxIterations,", with ",currentActors?.size," actors")
           // // DEBUG
           // if(currentActors.has(DEBUGTARGET))
           //   console.log('DEBUGTARGET : interpret : target found in currentIteration actors')
           try{
             interpreterStatus = {
-              interpreterId : request.interpreterId,
+              interpreterId : request.id,
               // FIXME dos needs to be set on initial status ... 
               // how to determine this acurately BEFORE fetchData() has been called?
-              dos : request.iterate ? this.interpreters.get(request.interpreterId)?.fetched?.length || 0 : undefined,
+              dos : request.iterate ? this.interpreters.get(request.id)?.fetched?.length || 0 : undefined,
               authors : currentActors.size
             }
             if(this.updateStatus && !await this.updateStatus(interpreterStatus)) throw('failed updating initial status')
             let fetchstart = Date.now()
             // fetch interpreter specific dataset for requestActors OR newActors OR allActors
             // pass currentSubjects from previous iteration
-            let dos = await this.interpreters.fetchData(request.interpreterId, currentActors, currentSubjects) || 1
+            let dos = await this.interpreters.fetchData(request.id, currentActors) || 1
             interpreterStatus.fetched = [
-                this.interpreters.get(request.interpreterId)?.fetched[dos -1]?.size || 0, // number of fetched events
+                this.interpreters.get(request.id)?.fetched[dos -1]?.size || 0, // number of fetched events
                 Date.now() - fetchstart, // duration of fetch request
                 currentIteration == maxIterations ? true : undefined // final DOS iteration ?
               ]
             if(this.updateStatus && !await this.updateStatus(interpreterStatus)) throw('failed updating status after fetch')
             let interpretstart = Date.now()
-            // interpret fetched data and get interactions + subjects for next iteration
-            newInteractions = await this.interpreters.interpret(request.interpreterId, dos)
+            // interpret fetched data and get interactions for next iteration
+            newInteractions = await this.interpreters.interpret(request.id, dos)
             if(!newInteractions) throw('interpret returned undefined')
             interpreterStatus.interpreted = [
                 countInteractionsMap(newInteractions), // number of interpretations rated
@@ -90,21 +93,19 @@ export class InterpretationController {
               ]
             if(this.updateStatus && !await this.updateStatus(interpreterStatus)) throw('failed updating status after interpret')
 
-            console.log("GrapeRank : interpret : ",request.interpreterId," protocol : interpretation complete for iteration ",currentIteration)
+            console.log("GrapeRank : interpret : ",request.id," protocol : interpretation complete for iteration ",currentIteration)
 
             // prepare for next iteration ONLY IF not on final iteration
             if(currentIteration < maxIterations) {
-              // get new actors discovered during fetch (from subject resolution)
-              const discoveredActors = this.interpreters.getDiscoveredActors(request.interpreterId)
-              if(discoveredActors?.size) {
-                discoveredActors.forEach((actor) => {
+              // get new actors discovered during latest iteration fetch
+              const resolvedActors = await this.interpreters.resolveActors(request.id)
+              resolvedActors?.forEach((actor) => {
                   if(!allActors.has(actor)) {
                     newActors.add(actor)
                     allActors.set(actor, currentIteration)
                   }
                 })
-                console.log("GrapeRank : interpret : "+request.interpreterId +" protocol : added " ,newActors.size, " new actors")
-              }
+                console.log("GrapeRank : interpret : "+request.id +" protocol : added " ,newActors.size, " new actors")
             }
             console.log("GrapeRank : interpretat : total ", allActors.size," actors")
 
@@ -113,7 +114,7 @@ export class InterpretationController {
           }
 
           outputResponses.push({
-            request : {...request, params : this.interpreters.get(request.interpreterId)?.params},
+            request : {...request, params : this.interpreters.get(request.id)?.params},
             index : requestindex,
             iteration : currentIteration,
             numActors : currentActors.size,
@@ -122,12 +123,12 @@ export class InterpretationController {
             numInteractions : newInteractions ? newInteractions.size : 0
           })
 
-          console.log("GrapeRank : interpret : "+request.interpreterId +" protocol : end iteration ", currentIteration, " of ", maxIterations)
+          console.log("GrapeRank : interpret : "+request.id +" protocol : end iteration ", currentIteration, " of ", maxIterations)
           console.log("----------------------------------")
         }
 
         // add the final map of currentInteractions to interactions list
-        addToInteractionsList(request.interpreterId, r as unknown as number, currentInteractions, outputInteractions)
+        addToInteractionsList(request.id, r as unknown as number, currentInteractions, outputInteractions)
       }
       // // DEBUG duplicate ratings
       // let numtargetratings : Map<actorId,number> = new Map()
@@ -221,7 +222,7 @@ export class InterpretersMap extends Map<InterpreterId<any>, Interpreter<Interpr
   }
 
   setRequest(request:InterpreterRequest<any>){
-    const interpreter = this.get(request.interpreterId)
+    const interpreter = this.get(request.id)
     if(interpreter) interpreter.request = request
   }
 
@@ -233,18 +234,18 @@ export class InterpretersMap extends Map<InterpreterId<any>, Interpreter<Interpr
     return this.get(interpreter)?.interactions
   }
 
-  async fetchData(interpreterId:InterpreterId<any>, actors?: Set<actorId>, subjects?: Set<subjectId>){
-    return await this.get(interpreterId)?.fetchData(actors, subjects)
+  async resolveActors(interpreterId:InterpreterId<any>, type? : povType, pov? : string | string[]){
+    return await this.get(interpreterId)?.resolveActors(type, pov)
+  }
+
+  async fetchData(interpreterId:InterpreterId<any>, actors?: Set<actorId>){
+    return await this.get(interpreterId)?.fetchData(actors)
   }
 
   async interpret(interpreter : InterpreterId<any>, dos : number){
     let instance = this.get(interpreter)
     let result = await instance?.interpret(dos)
     return result
-  }
-
-  getDiscoveredActors(interpreterId: InterpreterId<any>): Set<actorId> | undefined {
-    return this.get(interpreterId)?.discoveredActors
   }
 
 }
