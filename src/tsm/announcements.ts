@@ -157,7 +157,7 @@ export function generateServiceAnnouncement(
   
   if (config.info) {
     Object.entries(config.info).forEach(([key, value]) => {
-      tags.push(['info', key, value])
+      tags.push(['info', key, String(value)])
     })
   }
   

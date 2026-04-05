@@ -1,6 +1,8 @@
-# TSM GrapeRank: Next-Generation Web of Trust for Nostr
+# TSM GrapeRank: 
 
-> **⚠️ This library supersedes and deprecates [`@graperank/graperank`](https://github.com/Pretty-Good-Freedom-Tech/graperank-nodejs)**  
+## Next-Generation Webs of Trust for Nostr
+
+> **⚠️ This library supersedes and deprecates [`@Pretty-Good-Freedom-Tech/graperank-nodejs`](https://github.com/Pretty-Good-Freedom-Tech/graperank-nodejs)**  
 > If you're using the original GrapeRank library, please migrate to this TSM-compatible version for improved modularity, standardization, and interoperability.
 
 TSM GrapeRank allows anyone to set up a sovereignty-respecting recommendation and discovery service for Nostr, powered by Trust Machines and grapes. This rewritten library implements the [GrapeRank TSM NIP](https://github.com/graperank/tsm-graperank-nip) to allow for full user control and interoperability of algorithm configurations across service providers.

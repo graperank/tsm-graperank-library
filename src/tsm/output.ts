@@ -54,7 +54,10 @@ export async function executeServiceRequest(
 
   const onCalculatorStatus = async (status: CalculatorIterationStatus): Promise<void> => {
     if (verboseFeedback && callbacks?.onFeedbackEvent) {
-      const statusEntries = Object.entries(status)
+      const statusEntries = Object.entries(status) as Array<[
+        string,
+        { calculated?: number; uncalculated?: number; average?: number }
+      ]>
       const message = `Calculator iteration: ${statusEntries.map(([dos, data]) => 
         `DOS ${dos}: ${data.calculated || 0} calculated, ${data.uncalculated || 0} pending, avg rank ${data.average?.toFixed(4) || 0}`
       ).join('; ')}`
@@ -138,7 +141,12 @@ export async function executeServiceRequest(
       callbacks?.onFeedbackEvent
     )
 
-    const rankingsToOutput = applyPagination(rankings, pageSize, pageNumber)
+    const rankingsToOutput = applyPagination(rankings, pageSize, pageNumber).map(
+      ([subject, data]) => [
+        subject,
+        { rank: data.rank, confidence: data.confidence }
+      ] as [string, { rank?: number; confidence?: number }]
+    )
 
     await sendFeedback(
       requestEvent,

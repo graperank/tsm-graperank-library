@@ -1,9 +1,27 @@
 {
-  "name": "graperank-tsm",
+  "name": "@graperank/graperank-tsm",
   "version": "1.0.0",
   "description": "GrapeRank TSM (Trust Service Machines) - a highly configurable TSM service for ranking Nostr users and content.",
-  "main": "index.js",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"
@@ -11,7 +29,7 @@
   "keywords": [
     "nostr",
     "ranking",
-    "trustr",
+    "graperank",
     "tsm",
     "wot",
     "webs of trust"

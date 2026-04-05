@@ -1,8 +1,8 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "moduleResolution": "Node16",
-    "module": "Node16"
+    "moduleResolution": "Bundler",
+    "module": "ES2020"
   },
   "exclude": ["node_modules", "dist", "**/__tests__/**", "**/*.test.ts"]
 }
