@@ -4,6 +4,30 @@ import { NostrInterpreterClass } from "./classes"
 import { NostrInterpreterParams, NostrType } from './types'
 import { getEventActor, getEventSubject, validatePubkey } from './helpers'
 
+function getFirstTagValue(event: NostrEvent, tagName: string): string | undefined {
+  const found = event.tags.find((t) => t[0] === tagName)
+  return found?.[1]
+}
+
+function parsePubkeyFromAddressTag(address: string): string | undefined {
+  const parts = address.split(':')
+  if(parts.length < 2) return undefined
+  const pubkey = parts[1]
+  if(!validatePubkey(pubkey)) return undefined
+  return pubkey
+}
+
+function getAttestationSubjectPubkey(event: NostrEvent): string | undefined {
+  const address = getFirstTagValue(event, 'a')
+  if(address) {
+    const pubkey = parsePubkeyFromAddressTag(address)
+    if(pubkey) return pubkey
+  }
+  const p = getFirstTagValue(event, 'p')
+  if(p && validatePubkey(p)) return p
+  return undefined
+}
+
 // A generic callback for interpreting interactions from individual tags
 // where each tag represents a single actor/subject interaction in an event,
 // and where one tag index is the subject id and another is the actor's interaction,
@@ -223,5 +247,179 @@ export async function applyZapInteractions(instance : NostrInterpreterClass<Nost
   }
 
   console.log("GrapeRank : nostr interpreter : applyZapInteractions : total interpreted ", totalInteractions, " new interactions, skipped ", duplicateInteractions, " duplicates and ", skippedInvalid, " invalid zap receipts")
+  return newInteractionsMap
+}
+
+
+export async function applyAttestorRecommendationInteractions(
+  instance : NostrInterpreterClass<NostrInterpreterParams>,
+  dos : number
+) : Promise<InteractionsMap | undefined> {
+  console.log("GrapeRank : nostr interpreter : applyAttestorRecommendationInteractions()")
+  const actorType = instance.request?.params?.actorType
+  if(!actorType || !instance.allowedActorTypes.includes(actorType)) return undefined
+
+  const fetchedIndex = dos - 1
+  const fetchedSet = instance.fetched[fetchedIndex]
+  const newInteractionsMap : InteractionsMap = new Map()
+
+  const confidence = (instance.params.confidence as number) || .5
+  const perKindValue = typeof instance.params.perKindValue === 'number'
+    ? (instance.params.perKindValue as number)
+    : ((instance.params.value as number) || 0)
+  const maxKinds = typeof instance.params.maxKinds === 'number'
+    ? Math.max(0, instance.params.maxKinds as number)
+    : 1
+
+  let totalInteractions = 0
+  let skippedInvalid = 0
+  let duplicateInteractions = 0
+
+  for(const event of fetchedSet) {
+    const actor = getEventActor(actorType, event)
+    if(!actor) {
+      skippedInvalid++
+      continue
+    }
+
+    const kindCountRaw = event.tags.filter((t) => t[0] === 'k').length
+    const kindCount = Math.min(kindCountRaw, maxKinds)
+    const value = perKindValue * kindCount
+
+    const subjects: string[] = []
+    for(const tag of event.tags) {
+      if(tag[0] !== 'p') continue
+      const candidate = tag[1]
+      if(candidate && validatePubkey(candidate)) subjects.push(candidate)
+    }
+
+    // Fallback: treat 'd' as pubkey if no valid p tags exist
+    if(subjects.length === 0) {
+      const d = getFirstTagValue(event, 'd')
+      if(d && validatePubkey(d)) subjects.push(d)
+    }
+
+    if(subjects.length === 0) {
+      skippedInvalid++
+      continue
+    }
+
+    let actorInteractions = newInteractionsMap.get(actor)
+    if(!actorInteractions) {
+      actorInteractions = new Map<string, InteractionData>()
+      newInteractionsMap.set(actor, actorInteractions)
+    }
+
+    for(const subject of subjects) {
+      if(actorInteractions.has(subject)) {
+        duplicateInteractions++
+        continue
+      }
+      actorInteractions.set(subject, {confidence, value, dos})
+      totalInteractions++
+    }
+  }
+
+  console.log(
+    "GrapeRank : nostr interpreter : applyAttestorRecommendationInteractions : total interpreted ",
+    totalInteractions,
+    " new interactions, skipped ",
+    duplicateInteractions,
+    " duplicates and ",
+    skippedInvalid,
+    " invalid recommendations"
+  )
+
+  return newInteractionsMap
+}
+
+
+export async function applyAttestationInteractions(
+  instance : NostrInterpreterClass<NostrInterpreterParams>,
+  dos : number
+) : Promise<InteractionsMap | undefined> {
+  console.log("GrapeRank : nostr interpreter : applyAttestationInteractions()")
+  const actorType = instance.request?.params?.actorType
+  if(!actorType || !instance.allowedActorTypes.includes(actorType)) return undefined
+
+  const fetchedIndex = dos - 1
+  const fetchedSet = instance.fetched[fetchedIndex]
+  const newInteractionsMap : InteractionsMap = new Map()
+
+  const confidence = (instance.params.confidence as number) || .5
+  const valueValid = typeof instance.params.valueValid === 'number' ? (instance.params.valueValid as number) : (instance.params.value as number) || 0
+  const valueInvalid = typeof instance.params.valueInvalid === 'number' ? (instance.params.valueInvalid as number) : 0
+
+  const revokedD = new Set<string>()
+  for(const event of fetchedSet) {
+    const d = getFirstTagValue(event, 'd')
+    if(!d) continue
+    const state = getFirstTagValue(event, 's')
+    if(state === 'revoked') revokedD.add(d)
+  }
+
+  let totalInteractions = 0
+  let skippedInvalid = 0
+  let skippedRevoked = 0
+  let duplicateInteractions = 0
+
+  for(const event of fetchedSet) {
+    const d = getFirstTagValue(event, 'd')
+    if(d && revokedD.has(d)) {
+      skippedRevoked++
+      continue
+    }
+    const state = getFirstTagValue(event, 's')
+    if(state === 'revoked') {
+      skippedRevoked++
+      continue
+    }
+
+    const actor = getEventActor(actorType, event)
+    if(!actor) {
+      skippedInvalid++
+      continue
+    }
+    const subject = getAttestationSubjectPubkey(event)
+    if(!subject) {
+      skippedInvalid++
+      continue
+    }
+
+    const validity = getFirstTagValue(event, 'v')
+    let value: number | undefined
+    if(validity === 'valid') value = valueValid
+    else if(validity === 'invalid') value = valueInvalid
+    else {
+      skippedInvalid++
+      continue
+    }
+
+    let actorInteractions = newInteractionsMap.get(actor)
+    if(!actorInteractions) {
+      actorInteractions = new Map<string, InteractionData>()
+      newInteractionsMap.set(actor, actorInteractions)
+    }
+    if(actorInteractions.has(subject)) {
+      duplicateInteractions++
+      continue
+    }
+
+    actorInteractions.set(subject, {confidence, value, dos})
+    totalInteractions++
+  }
+
+  console.log(
+    "GrapeRank : nostr interpreter : applyAttestationInteractions : total interpreted ",
+    totalInteractions,
+    " new interactions, skipped ",
+    duplicateInteractions,
+    " duplicates, skipped ",
+    skippedRevoked,
+    " revoked and ",
+    skippedInvalid,
+    " invalid attestations"
+  )
+
   return newInteractionsMap
 }

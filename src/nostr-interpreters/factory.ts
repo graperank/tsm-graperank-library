@@ -1,6 +1,6 @@
 import { InterpreterParams } from "../graperank/types";
 import { NostrInterpreterClass, NostrInterpreterFactory } from "./classes";
-import { applyInteractionsByTag, applyZapInteractions, validateEachEventHasAuthor } from "./callbacks";
+import { applyAttestationInteractions, applyAttestorRecommendationInteractions, applyInteractionsByTag, applyZapInteractions, validateEachEventHasAuthor } from "./callbacks";
 import { NostrInterpreterParams } from "./types";
 
 export const InterpreterFactory = new NostrInterpreterFactory()
@@ -139,6 +139,60 @@ InterpreterFactory.set('nostr-9735', () => new NostrInterpreterClass<ZapParams>(
     },
     interpret : (instance, fetchedIndex) => {
       return applyZapInteractions(instance, fetchedIndex)
+    }
+  }
+))
+
+
+interface AttestorRecommendationsParams extends NostrInterpreterParams {
+  perKindValue: number
+  maxKinds: number
+}
+InterpreterFactory.set('nostr-31873', () => new NostrInterpreterClass<AttestorRecommendationsParams>(
+  {
+    interpretKind: 31873,
+    fetchKinds : [31873],
+    label: "Attestor Recommendations",
+    description: 'Interprets recommendation events and builds recommender-to-attestor interactions.',
+    allowedActorTypes: ['pubkey'],
+    allowedSubjectTypes: ['pubkey', 'p', 'd'],
+    defaultParams : {
+      value : 1,
+      confidence : .5,
+      actorType: 'pubkey',
+      subjectType: 'p',
+      perKindValue: 1,
+      maxKinds: 3,
+    },
+    interpret : (instance, fetchedIndex) => {
+      return applyAttestorRecommendationInteractions(instance, fetchedIndex)
+    }
+  }
+))
+
+
+interface AttestationsParams extends NostrInterpreterParams {
+  valueValid: number
+  valueInvalid: number
+}
+InterpreterFactory.set('nostr-31871', () => new NostrInterpreterClass<AttestationsParams>(
+  {
+    interpretKind: 31871,
+    fetchKinds : [31871],
+    label: "Attestations",
+    description: 'Interprets Attestation events and builds pubkey-to-pubkey trust interactions.',
+    allowedActorTypes: ['pubkey'],
+    allowedSubjectTypes: ['a', 'p'],
+    defaultParams : {
+      value : 1,
+      confidence : .5,
+      actorType: 'pubkey',
+      subjectType: 'a',
+      valueValid: 1,
+      valueInvalid: 0,
+    },
+    interpret : (instance, fetchedIndex) => {
+      return applyAttestationInteractions(instance, fetchedIndex)
     }
   }
 ))
