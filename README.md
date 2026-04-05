@@ -75,7 +75,7 @@ Handles TSM protocol compliance:
 ## Installation
 
 ```bash
-npm install github:graperank/tsm-graperank-library
+npm install @graperank/tsm-graperank-library
 ```
 
 ## Usage
