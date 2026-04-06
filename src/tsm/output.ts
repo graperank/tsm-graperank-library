@@ -162,7 +162,7 @@ export async function executeServiceRequest(
         totalResults: rankings.length,
         pageSize,
         pageNumber
-      }
+      },
     )
 
     if (callbacks?.onOutputEvent) {
@@ -220,6 +220,7 @@ export function generateRankingOutputEvent(
     pageNumber?: number
   }
 ): UnsignedEvent {
+  const resultTagName = requestEvent.tags.find(t => t[0] === 'config' && t[1] === 'type')?.[2] as string
   const tags: string[][] = [
     ['e', requestEvent.id, '', 'request'],
     ['p', requestEvent.pubkey],
@@ -240,7 +241,7 @@ export function generateRankingOutputEvent(
     const rank = data.rank ?? 0
     const confidence = data.confidence ?? 0
     tags.push([
-      'result',
+      resultTagName,
       subject,
       rank.toFixed(6),
       confidence.toFixed(4),
