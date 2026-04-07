@@ -40,12 +40,18 @@ function getAttestationSubjectPubkey(event: NostrEvent): string | undefined {
 export async function applyInteractionsByTag(instance : NostrInterpreterClass<NostrInterpreterParams>, dos : number, tag? : NostrType, subjectIndex : number = 1, interactionIndex? : number) : Promise<InteractionsMap | undefined>{
   console.log("GrapeRank : nostr interpreter : applyInteractionsByTag()")
   const actorType = instance.request?.params?.actorType
+  console.log("GrapeRank : nostr interpreter : applyInteractionsByTag : actorType=", actorType, "allowedActorTypes=", instance.allowedActorTypes)
   // validate 
-  if(!actorType || !instance.allowedActorTypes.includes(actorType)) 
+  if(!actorType || !instance.allowedActorTypes.includes(actorType)) {
+    console.log("GrapeRank : nostr interpreter : applyInteractionsByTag : FAILED actorType validation")
     return undefined
+  }
   const subjectType = tag || instance.request?.params?.subjectType
-  if(!subjectType || !instance.allowedSubjectTypes.includes(subjectType)) 
+  console.log("GrapeRank : nostr interpreter : applyInteractionsByTag : subjectType=", subjectType, "allowedSubjectTypes=", instance.allowedSubjectTypes)
+  if(!subjectType || !instance.allowedSubjectTypes.includes(subjectType)) {
+    console.log("GrapeRank : nostr interpreter : applyInteractionsByTag : FAILED subjectType validation")
     return undefined
+  }
   
   let fetchedIndex = dos - 1
   const fetchedSet = instance.fetched[fetchedIndex]
