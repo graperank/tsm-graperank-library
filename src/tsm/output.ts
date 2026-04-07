@@ -141,38 +141,45 @@ export async function executeServiceRequest(
       callbacks?.onFeedbackEvent
     )
 
-    const rankingsToOutput = applyPagination(rankings, pageSize, pageNumber).map(
-      ([subject, data]) => [
-        subject,
-        { rank: data.rank, confidence: data.confidence }
-      ] as [string, { rank?: number; confidence?: number }]
-    )
+    const totalPages = pageSize && pageSize > 0 ? Math.ceil(rankings.length / pageSize) : 1
+    const startPage = pageNumber !== undefined ? pageNumber : 0
 
-    await sendFeedback(
-      requestEvent,
-      'info',
-      `Generating output: ${rankingsToOutput.length} rankings`,
-      callbacks?.onFeedbackEvent
-    )
+    for (let page = startPage; page < (pageNumber !== undefined ? startPage + 1 : totalPages); page++) {
+      const startIdx = page * (pageSize || rankings.length)
+      const endIdx = startIdx + (pageSize || rankings.length)
+      const rankingsToOutput = rankings.slice(startIdx, endIdx).map(
+        ([subject, data]) => [
+          subject,
+          { rank: data.rank, confidence: data.confidence }
+        ] as [string, { rank?: number; confidence?: number }]
+      )
 
-    const rankingEvent = generateRankingOutputEvent(
-      requestEvent,
-      rankingsToOutput,
-      {
-        totalResults: rankings.length,
-        pageSize,
-        pageNumber
-      },
-    )
+      await sendFeedback(
+        requestEvent,
+        'info',
+        `Generating output page ${page}: ${rankingsToOutput.length} rankings`,
+        callbacks?.onFeedbackEvent
+      )
 
-    if (callbacks?.onOutputEvent) {
-      await callbacks.onOutputEvent(rankingEvent)
+      const rankingEvent = generateRankingOutputEvent(
+        requestEvent,
+        rankingsToOutput,
+        {
+          totalResults: rankings.length,
+          pageSize,
+          pageNumber: page
+        },
+      )
+
+      if (callbacks?.onOutputEvent) {
+        await callbacks.onOutputEvent(rankingEvent)
+      }
     }
 
     await sendFeedback(
       requestEvent,
       'success',
-      'Service request completed successfully',
+      `Service request completed successfully: ${totalPages} page(s) generated`,
       callbacks?.onFeedbackEvent
     )
 
@@ -230,8 +237,12 @@ export function generateRankingOutputEvent(
   ]
 
   // Add d tag from request to make output replaceable
+  // For paginated results, append page number to make each page separately replaceable
   if (requestDTag) {
-    tags.push(['d', requestDTag])
+    const dTagValue = pagination?.pageNumber !== undefined 
+      ? `${requestDTag}-page-${pagination.pageNumber}`
+      : requestDTag
+    tags.push(['d', dTagValue])
   }
 
   if (pagination) {
