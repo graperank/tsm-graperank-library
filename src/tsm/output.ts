@@ -142,10 +142,10 @@ export async function executeServiceRequest(
     )
 
     const totalPages = pageSize && pageSize > 0 ? Math.ceil(rankings.length / pageSize) : 1
-    const startPage = pageNumber !== undefined ? pageNumber : 0
+    const startPage = pageNumber !== undefined ? pageNumber : 1
 
-    for (let page = startPage; page < (pageNumber !== undefined ? startPage + 1 : totalPages); page++) {
-      const startIdx = page * (pageSize || rankings.length)
+    for (let page = startPage; page <= (pageNumber !== undefined ? startPage : totalPages); page++) {
+      const startIdx = (page - 1) * (pageSize || rankings.length)
       const endIdx = startIdx + (pageSize || rankings.length)
       const rankingsToOutput = rankings.slice(startIdx, endIdx).map(
         ([subject, data]) => [
