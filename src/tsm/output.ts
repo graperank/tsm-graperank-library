@@ -221,11 +221,18 @@ export function generateRankingOutputEvent(
   }
 ): UnsignedEvent {
   const resultTagName = requestEvent.tags.find(t => t[0] === 'config' && t[1] === 'type')?.[2] as string
+  const requestDTag = requestEvent.tags.find(t => t[0] === 'd')?.[1]
+  
   const tags: string[][] = [
     ['e', requestEvent.id, '', 'request'],
     ['p', requestEvent.pubkey],
     ['k', String(requestEvent.kind)]
   ]
+
+  // Add d tag from request to make output replaceable
+  if (requestDTag) {
+    tags.push(['d', requestDTag])
+  }
 
   if (pagination) {
     tags.push(['total', String(pagination.totalResults)])
