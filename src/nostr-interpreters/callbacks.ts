@@ -145,10 +145,10 @@ export function getEventsAuthors(events: Set<NostrEvent>, exclude? : actorId[]) 
 // based on zap amount.
 export async function applyZapInteractions(instance : NostrInterpreterClass<NostrInterpreterParams>, dos : number) : Promise<InteractionsMap | undefined> {
   console.log("GrapeRank : nostr interpreter : applyZapInteractions()")
-  const actorType = instance.request?.params?.actorType
+  const actorType = instance.params.actorType
   if(!actorType || !instance.allowedActorTypes.includes(actorType)) 
     return undefined
-  const subjectType = instance.request?.params?.subjectType
+  const subjectType = instance.params.subjectType
   if(!subjectType || !instance.allowedSubjectTypes.includes(subjectType)) 
     return undefined
   
@@ -264,7 +264,7 @@ export async function applyAttestorRecommendationInteractions(
   dos : number
 ) : Promise<InteractionsMap | undefined> {
   console.log("GrapeRank : nostr interpreter : applyAttestorRecommendationInteractions()")
-  const actorType = instance.request?.params?.actorType
+  const actorType = instance.params.actorType
   if(!actorType || !instance.allowedActorTypes.includes(actorType)) return undefined
 
   const fetchedIndex = dos - 1
@@ -347,7 +347,7 @@ export async function applyAttestationInteractions(
   dos : number
 ) : Promise<InteractionsMap | undefined> {
   console.log("GrapeRank : nostr interpreter : applyAttestationInteractions()")
-  const actorType = instance.request?.params?.actorType
+  const actorType = instance.params.actorType
   if(!actorType || !instance.allowedActorTypes.includes(actorType)) return undefined
 
   const fetchedIndex = dos - 1
