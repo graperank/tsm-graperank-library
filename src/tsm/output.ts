@@ -143,8 +143,11 @@ export async function executeServiceRequest(
 
     const totalPages = pageSize && pageSize > 0 ? Math.ceil(rankings.length / pageSize) : 1
     const startPage = pageNumber !== undefined ? pageNumber : 1
+    
+    console.log(`[pagination] totalResults=${rankings.length}, pageSize=${pageSize}, totalPages=${totalPages}, startPage=${startPage}`)
 
     for (let page = startPage; page <= (pageNumber !== undefined ? startPage : totalPages); page++) {
+      console.log(`[pagination] generating page ${page} of ${totalPages}`)
       const startIdx = (page - 1) * (pageSize || rankings.length)
       const endIdx = startIdx + (pageSize || rankings.length)
       const rankingsToOutput = rankings.slice(startIdx, endIdx).map(
