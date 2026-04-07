@@ -247,10 +247,10 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   // An iterative function ... 
   // possibly calls itself again if validation fails
   // returns a single promise with possibly nested promises
-  private async fetchEventsPromise(filter: NostrFilter, fetchedSet : Set<NostrEvent>, iteration = 0) : Promise<void> {
-    if(!filter.authors) 
+  private async fetchEventsPromise(filter: NostrFilter, fetchedSet : Set<NostrEvent>, iteration : number = 0) : Promise<void> {
+    if(!filter.authors || !filter.authors.length)
       return new Promise((resolve,reject)=> reject("No authors provided"))
-    console.log("GrapeRank : nostr interpreter : fetching events in request ",iteration, " for ",filter.authors?.length, " actors")
+    console.log("GrapeRank : nostr interpreter : fetching events in request ",iteration, " for ",filter.authors?.length, " actors from relays:", NostrInterpreterClass.relays)
     return new Promise((resolve)=>{
       fetchEvents(filter, NostrInterpreterClass.relays).then(async (newFetchedSet)=>{
         let validation = true // this.validate ? this.validate(newFetchedSet, filter.authors as string[], fetchedSet) : true

@@ -49,6 +49,7 @@ export async function applyInteractionsByTag(instance : NostrInterpreterClass<No
   
   let fetchedIndex = dos - 1
   const fetchedSet = instance.fetched[fetchedIndex]
+  console.log("GrapeRank : nostr interpreter : applyInteractionsByTag : processing", fetchedSet.size, "events")
   const newInteractionsMap : InteractionsMap = new Map()
   let eventindex : number = 0, 
     totalInteractions : number = 0, 
@@ -57,6 +58,7 @@ export async function applyInteractionsByTag(instance : NostrInterpreterClass<No
     confidence = instance.params.confidence as number || .5
   
   for(let event of fetchedSet) {
+    console.log("GrapeRank : nostr interpreter : applyInteractionsByTag : event", event.id.substring(0, 8), "kind", event.kind, "tags:", event.tags?.length || 0)
     let actor = getEventActor(actorType, event)
     if(!actor) continue
     const actorInteractions = new Map<string, InteractionData>()
