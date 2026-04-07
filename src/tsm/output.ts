@@ -223,7 +223,7 @@ export function generateRankingOutputEvent(
   rankings: [string, { rank?: number; confidence?: number }][],
   pagination?: {
     totalResults: number
-    pageSize?: number
+    pageSize: number
     pageNumber?: number
   }
 ): UnsignedEvent {
@@ -235,23 +235,22 @@ export function generateRankingOutputEvent(
     ['p', requestEvent.pubkey],
     ['k', String(requestEvent.kind)]
   ]
+  const pageIds: string[] = generatePageIds(requestDTag, pagination)
 
   // Add d tag from request to make output replaceable
-  // For paginated results, append page number to make each page separately replaceable
-  if (requestDTag) {
-    const dTagValue = pagination?.pageNumber !== undefined 
-      ? `${requestDTag}-page-${pagination.pageNumber}`
-      : requestDTag
-    tags.push(['d', dTagValue])
-  }
+  // append page number to `d` tag to make each page separately addressable
+  const dTagValue = pageIds[pagination?.pageNumber - 1]
+  tags.push(['d', dTagValue])
 
   if (pagination) {
     tags.push(['total', String(pagination.totalResults)])
     if (pagination.pageSize !== undefined) {
       tags.push(['page-size', String(pagination.pageSize)])
     }
+    // page tag MUST include a json array of every `d` tag value
+    // from all the pages in this result, as a third value
     if (pagination.pageNumber !== undefined) {
-      tags.push(['page', String(pagination.pageNumber)])
+      tags.push(['page', String(pagination.pageNumber), JSON.stringify(pageIds)])
     }
   }
 
@@ -300,4 +299,15 @@ function applyPagination<T>(
   const endIndex = startIndex + pageSize
 
   return items.slice(startIndex, endIndex)
+}
+
+function generatePageIds(baseId: string, pagination?: { totalResults: number; pageSize: number }): string[] {
+  // If no pagination, return just the base ID
+  if (!pagination) return [baseId]  
+  // Generate page IDs for all pages
+  const totalPages = Math.ceil(pagination.totalResults / pagination.pageSize)
+  const pageIds = Array.from({ length: totalPages }, (_, i) => `${baseId}-page-${i + 1}`)
+  // replace the first page ID with the original base ID
+  pageIds[0] = baseId
+  return pageIds
 }
