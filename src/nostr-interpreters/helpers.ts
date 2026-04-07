@@ -2,13 +2,6 @@ import { NostrEvent, NostrFilter, SimplePool, npubEncode } from '../lib/nostr-to
 import { NostrTagType, NostrType } from './types'
 import { RankedPov, UnrankedPov } from '../graperank/types'
 
-const relays = [
-  "wss://gv.rogue.earth",
-  "wss://nostr.bitcoiner.social",
-  "wss://relay.nostr.band",
-  "wss://relay.snort.social",
-  "wss://nos.lol",
-]
 
 export const PubkeyTypes : NostrType[] = ["pubkey", "p", "P"]
 export const EventTypes : NostrType[] = ["id", "e", "a"]
@@ -21,7 +14,8 @@ export const maxfetch = 500
  * @returns 
  */
 export async function fetchEvents(
-    filters: NostrFilter 
+    filters: NostrFilter,
+    relays: string[]
 ): Promise<Set<NostrEvent>> {
     return new Promise((resolve) => {
         const events: Map<string, NostrEvent> = new Map();
