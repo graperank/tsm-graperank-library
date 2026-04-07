@@ -142,10 +142,10 @@ export async function executeServiceRequest(
     )
 
     const totalPages = pageSize && pageSize > 0 ? Math.ceil(rankings.length / pageSize) : 1
-    const startPage = pageNumber !== undefined ? pageNumber : 1
+    const startPage = pageNumber !== undefined ? pageNumber : 0
 
-    for (let page = startPage; page <= (pageNumber !== undefined ? startPage : totalPages); page++) {
-      const startIdx = (page - 1) * (pageSize || rankings.length)
+    for (let page = startPage; page < (pageNumber !== undefined ? startPage + 1 : totalPages); page++) {
+      const startIdx = page * (pageSize || rankings.length)
       const endIdx = startIdx + (pageSize || rankings.length)
       const rankingsToOutput = rankings.slice(startIdx, endIdx).map(
         ([subject, data]) => [
@@ -242,15 +242,20 @@ export function generateRankingOutputEvent(
   const dTagValue = pageIds[pagination?.pageNumber - 1]
   tags.push(['d', dTagValue])
 
+  // Pagination metadata gets added as `v` tags to output events
+  // Rather than reserving 'page' or other arbitrary tagnames
+  // output metadata is always rendered to `v` tags
+  // allowing output results to be rendered to any tag 
+  // without worry of name collisions
   if (pagination) {
-    tags.push(['total', String(pagination.totalResults)])
+    tags.push(['v', `total:${pagination.totalResults}`])
     if (pagination.pageSize !== undefined) {
-      tags.push(['page-size', String(pagination.pageSize)])
+      tags.push(['v', `page-size:${pagination.pageSize}`])
     }
     // page tag MUST include a json array of every `d` tag value
     // from all the pages in this result, as a third value
     if (pagination.pageNumber !== undefined) {
-      tags.push(['page', String(pagination.pageNumber), JSON.stringify(pageIds)])
+      tags.push(['v', `page:${pagination.pageNumber}`, JSON.stringify([requestDTag])])
     }
   }
 
