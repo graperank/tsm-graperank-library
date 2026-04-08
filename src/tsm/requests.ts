@@ -85,11 +85,8 @@ export function parseServiceRequest(
   
   const povValue = getConfigTag(event.tags, 'pov')
   if (povValue) {
-    try {
-      configs.pov = parseConfigValue(povValue, 'json')
-    } catch {
-      configs.pov = povValue
-    }
+    const parsed = parseConfigValue(povValue, 'json')
+    configs.pov = parsed !== undefined ? parsed : povValue
   } else if (defaults?.pov) {
     configs.pov = defaults.pov
   }
