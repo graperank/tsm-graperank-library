@@ -20,6 +20,7 @@ export type FeedbackEventType = 'info' | 'warning' | 'error' | 'success'
 export type ServiceOutputCallbacks = {
   onFeedbackEvent?: (event: UnsignedEvent) => void | Promise<void>
   onOutputEvent?: (event: UnsignedEvent) => void | Promise<void>
+  onKeepAlive?: () => void
 }
 
 export type ServiceOutputConfig = {
@@ -148,6 +149,12 @@ export async function executeServiceRequest(
 
     for (let page = startPage; page <= (pageNumber !== undefined ? startPage : totalPages); page++) {
       console.log(`[pagination] generating page ${page} of ${totalPages}`)
+      
+      // Send keep-alive every 5 pages to prevent connection timeout
+      if (page % 5 === 0 && callbacks?.onKeepAlive) {
+        callbacks.onKeepAlive()
+      }
+      
       const startIdx = (page - 1) * (pageSize || rankings.length)
       const endIdx = startIdx + (pageSize || rankings.length)
       const rankingsToOutput = rankings.slice(startIdx, endIdx).map(
