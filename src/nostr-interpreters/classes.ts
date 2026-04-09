@@ -35,9 +35,9 @@ export class NostrInterpreterFactory extends InterpreterFactory<"nostr"> {
 export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> implements Interpreter<ParamsType> {
 
   private static _relays: string[] = [
+    "ws://10.118.0.4:8080",
     "wss://relay.primal.net",
-    "wss://relay.damus.io",
-    "wss://relay.nostr.band"
+    "wss://relay.damus.io"
   ]
   static get relays() {
     return this._relays
