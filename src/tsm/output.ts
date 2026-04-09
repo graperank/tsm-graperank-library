@@ -265,7 +265,7 @@ export function generateRankingOutputEvent(
     // page tag MUST include a json array of every `d` tag value
     // from all the pages in this result, as a third value
     if (pagination.pageNumber !== undefined) {
-      tags.push(['v', `page:${pagination.pageNumber}`, JSON.stringify([requestDTag])])
+      tags.push(['v', `page:${pagination.pageNumber}`, JSON.stringify(pageIds)])
     }
   }
 
@@ -320,7 +320,7 @@ function generatePageIds(baseId: string, pagination?: { totalResults: number; pa
   if (!pagination) return [baseId]  
   // Generate page IDs for all pages
   const totalPages = Math.ceil(pagination.totalResults / pagination.pageSize)
-  const pageIds = Array.from({ length: totalPages }, (_, i) => `${baseId}-page-${i + 1}`)
+  const pageIds = Array.from({ length: totalPages }, (_, i) => `${baseId}:${i + 1}`)
   // replace the first page ID with the original base ID
   pageIds[0] = baseId
   return pageIds
