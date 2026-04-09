@@ -20,8 +20,11 @@ export async function fetchEvents(
     console.log("fetchEvents called with relays:", relays, "relays length:", relays.length, "filters:", JSON.stringify(filters))
     const pool = new SimplePool()
     try {
-        const events = await pool.querySync([...relays], filters)
-        console.log("fetchEvents received", events.length, "events from pool.querySync")
+        // Try only the first relay (cache relay) first
+        const cacheRelay = relays[0]
+        console.log("fetchEvents trying cache relay:", cacheRelay)
+        const events = await pool.querySync([cacheRelay], filters)
+        console.log("fetchEvents received", events.length, "events from cache relay")
         const dedupedEvents = new Map<string, NostrEvent>()
         for (let event of events) {
             const dedupKey = deduplicationKey(event)
@@ -31,7 +34,11 @@ export async function fetchEvents(
             }
             dedupedEvents.set(dedupKey, event)
         }
+        console.log("fetchEvents deduped to", dedupedEvents.size, "unique events")
         return new Set(dedupedEvents.values())
+    } catch (error) {
+        console.error("fetchEvents error:", error)
+        return new Set()
     } finally {
         pool.close(relays)
     }
