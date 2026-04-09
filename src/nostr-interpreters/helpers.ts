@@ -18,33 +18,23 @@ export async function fetchEvents(
     relays: string[]
 ): Promise<Set<NostrEvent>> {
     console.log("fetchEvents called with relays:", relays, "relays length:", relays.length, "filters:", JSON.stringify(filters))
-    return new Promise((resolve) => {
-        const events: Map<string, NostrEvent> = new Map();
-
-        const onEvent = (event: NostrEvent) => {
-            const dedupKey = deduplicationKey(event);
-
-            const existingEvent = events.get(dedupKey);
+    const pool = new SimplePool()
+    try {
+        const events = await pool.querySync([...relays], filters)
+        console.log("fetchEvents received", events.length, "events from pool.querySync")
+        const dedupedEvents = new Map<string, NostrEvent>()
+        for (let event of events) {
+            const dedupKey = deduplicationKey(event)
+            const existingEvent = dedupedEvents.get(dedupKey)
             if (existingEvent) {
-                event = dedupEvent(existingEvent, event);
+                event = dedupEvent(existingEvent, event)
             }
-
-            events.set(dedupKey, event);
-        };
-
-        const pool = new SimplePool()
-
-        let h = pool.subscribeMany(
-          [...relays],filters,
-          {
-            onevent : onEvent,
-            oneose() {
-              h.close()
-              resolve(new Set(events.values()));
-            }
-          }
-        )
-    });
+            dedupedEvents.set(dedupKey, event)
+        }
+        return new Set(dedupedEvents.values())
+    } finally {
+        pool.close(relays)
+    }
 }
 
 function dedupEvent(event1: NostrEvent, event2: NostrEvent) {
