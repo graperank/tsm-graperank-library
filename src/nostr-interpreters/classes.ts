@@ -35,7 +35,6 @@ export class NostrInterpreterFactory extends InterpreterFactory<"nostr"> {
 export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> implements Interpreter<ParamsType> {
 
   private static _relays: string[] = [
-    "ws://10.118.0.4:8080",
     "wss://relay.primal.net",
     "wss://relay.damus.io"
   ]
@@ -250,7 +249,8 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   private async fetchEventsPromise(filter: NostrFilter, fetchedSet : Set<NostrEvent>, iteration : number = 0) : Promise<void> {
     if(!filter.authors || !filter.authors.length)
       return new Promise((resolve,reject)=> reject("No authors provided"))
-    console.log("GrapeRank : nostr interpreter : fetching events in request ",iteration, " for ",filter.authors?.length, " actors from relays:", NostrInterpreterClass.relays)
+    const relays = NostrInterpreterClass.relays
+    console.log("GrapeRank : nostr interpreter : fetching events in request ",iteration, " for ",filter.authors?.length, " actors from relays:", relays, "relays length:", relays.length, "relays JSON:", JSON.stringify(relays))
     return new Promise((resolve)=>{
       fetchEvents(filter, NostrInterpreterClass.relays).then(async (newFetchedSet)=>{
         let validation = true // this.validate ? this.validate(newFetchedSet, filter.authors as string[], fetchedSet) : true
