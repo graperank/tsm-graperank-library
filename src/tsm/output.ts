@@ -269,15 +269,14 @@ export function generateRankingOutputEvent(
     }
   }
 
-  rankings.forEach(([subject, data], index) => {
+  rankings.forEach(([subject, data]) => {
     const rank = data.rank ?? 0
     const confidence = data.confidence ?? 0
     tags.push([
       resultTagName,
       subject,
       rank.toFixed(6),
-      confidence.toFixed(4),
-      String(index)
+      confidence.toFixed(4)
     ])
   })
 
