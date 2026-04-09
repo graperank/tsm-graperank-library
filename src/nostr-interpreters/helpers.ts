@@ -17,6 +17,7 @@ export async function fetchEvents(
     filters: NostrFilter,
     relays: string[]
 ): Promise<Set<NostrEvent>> {
+    console.log("fetchEvents called with relays:", relays, "relays length:", relays.length, "filters:", JSON.stringify(filters))
     return new Promise((resolve) => {
         const events: Map<string, NostrEvent> = new Map();
 
