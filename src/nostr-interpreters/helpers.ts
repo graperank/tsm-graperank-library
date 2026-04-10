@@ -17,19 +17,13 @@ export async function fetchEvents(
     filters: NostrFilter,
     relays: string[]
 ): Promise<Set<NostrEvent>> {
+    // Add limit if not present (many relays require it)
+    if (!filters.limit) {
+        filters.limit = 1000;
+    }
     console.log("fetchEvents called with relays:", relays, "relays length:", relays.length, "filters:", JSON.stringify(filters))
     return new Promise((resolve) => {
         const events: Map<string, NostrEvent> = new Map();
-        let resolved = false;
-
-        const doResolve = (reason: string) => {
-            if (resolved) return;
-            resolved = true;
-            h.close()
-            pool.close(relays)
-            console.log("fetchEvents resolved via", reason, "with", events.size, "events")
-            resolve(new Set(events.values()));
-        };
 
         const onEvent = (event: NostrEvent) => {
             console.log("fetchEvents onEvent called, event kind:", event.kind, "id:", event.id.substring(0, 8))
@@ -45,23 +39,15 @@ export async function fetchEvents(
 
         const pool = new SimplePool()
 
-        // Resolve after 3 seconds regardless of EOSE
-        const timeoutId = setTimeout(() => {
-            console.log("fetchEvents timeout after 3 seconds")
-            doResolve("timeout");
-        }, 3000);
-
         let h = pool.subscribeMany(
           [...relays],filters,
           {
             onevent : onEvent,
             oneose() {
-              console.log("fetchEvents EOSE received")
-              // Resolve on first EOSE after a short delay to collect more events
-              setTimeout(() => {
-                clearTimeout(timeoutId);
-                doResolve("EOSE");
-              }, 500);
+              console.log("fetchEvents EOSE received, closing with", events.size, "events")
+              h.close()
+              pool.close(relays)
+              resolve(new Set(events.values()));
             }
           }
         )
