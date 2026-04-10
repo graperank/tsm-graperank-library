@@ -20,8 +20,11 @@ export async function fetchEvents(
     console.log("fetchEvents called with relays:", relays, "relays length:", relays.length, "filters:", JSON.stringify(filters))
     return new Promise((resolve) => {
         const events: Map<string, NostrEvent> = new Map();
+        let eoseCount = 0;
+        const totalRelays = relays.length;
 
         const onEvent = (event: NostrEvent) => {
+            console.log("fetchEvents onEvent called, event kind:", event.kind, "id:", event.id.substring(0, 8))
             const dedupKey = deduplicationKey(event);
 
             const existingEvent = events.get(dedupKey);
@@ -34,13 +37,28 @@ export async function fetchEvents(
 
         const pool = new SimplePool()
 
+        const timeoutId = setTimeout(() => {
+            console.log("fetchEvents timeout after 5 seconds, closing subscription")
+            h.close()
+            pool.close(relays)
+            console.log("fetchEvents timeout resolved with", events.size, "events")
+            resolve(new Set(events.values()));
+        }, 5000);
+
         let h = pool.subscribeMany(
           [...relays],filters,
           {
             onevent : onEvent,
             oneose() {
-              h.close()
-              resolve(new Set(events.values()));
+              eoseCount++;
+              console.log("fetchEvents EOSE received", eoseCount, "of", totalRelays)
+              if (eoseCount >= totalRelays) {
+                clearTimeout(timeoutId);
+                h.close()
+                pool.close(relays)
+                console.log("fetchEvents all EOSE received, resolved with", events.size, "events")
+                resolve(new Set(events.values()));
+              }
             }
           }
         )
