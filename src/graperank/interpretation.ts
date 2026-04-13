@@ -110,13 +110,22 @@ export class InterpretationController {
                   }
                 })
                 console.log("GrapeRank : interpret : "+request.id +" protocol : added " ,newActors.size, " new actors")
-                
-                // Memory optimization: Suggest garbage collection between DOS iterations
-                // This helps prevent memory accumulation during deep iterations
-                if(global.gc) {
-                  global.gc()
-                  console.log("GrapeRank : interpret : triggered garbage collection after iteration ",currentIteration)
-                }
+            }
+            
+            // Memory optimization: Clear fetched events AFTER resolveActors has extracted subjects
+            // Events are no longer needed once interactions are extracted and new actors resolved
+            const interpreter = this.interpreters.get(request.id)
+            if(interpreter && interpreter.fetched[dos - 1]) {
+              const eventCount = interpreter.fetched[dos - 1].size
+              interpreter.fetched[dos - 1].clear()
+              console.log("GrapeRank : interpret : cleared ",eventCount," fetched events from DOS ",dos," to free memory")
+            }
+            
+            // Memory optimization: Suggest garbage collection between DOS iterations
+            // This helps prevent memory accumulation during deep iterations
+            if(currentIteration < maxIterations && global.gc) {
+              global.gc()
+              console.log("GrapeRank : interpret : triggered garbage collection after iteration ",currentIteration)
             }
             console.log("GrapeRank : interpretat : total ", allActors.size," actors")
 
