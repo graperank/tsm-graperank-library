@@ -110,6 +110,13 @@ export class InterpretationController {
                   }
                 })
                 console.log("GrapeRank : interpret : "+request.id +" protocol : added " ,newActors.size, " new actors")
+                
+                // Memory optimization: Suggest garbage collection between DOS iterations
+                // This helps prevent memory accumulation during deep iterations
+                if(global.gc) {
+                  global.gc()
+                  console.log("GrapeRank : interpret : triggered garbage collection after iteration ",currentIteration)
+                }
             }
             console.log("GrapeRank : interpretat : total ", allActors.size," actors")
 

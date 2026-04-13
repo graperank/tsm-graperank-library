@@ -118,6 +118,11 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
 
       console.log("GrapeRank : ",this.request?.id," interpreter : merged iteration ",dos," into total interpreted : ", numInteractionsMerged ," new interactions and ",numInteractionsDuplicate," duplicate interactions from ",newInteractions.size," authors")
 
+      // Memory optimization: Clear fetched events after interpretation to free memory
+      // Events are no longer needed once interactions are extracted
+      this.fetched[fetchedIndex].clear()
+      console.log("GrapeRank : ",this.request?.id," interpreter : cleared fetched events from iteration ",dos," to free memory")
+
       return result
     }
   }
@@ -213,6 +218,15 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     // get actors from request if not provided
     if(!this.request) throw('no request set for this interpreter')
     actors = actors || new Set(this.request?.actors)
+    
+    // Safety limit: prevent OOM by capping authors per DOS iteration
+    const MAX_AUTHORS_PER_ITERATION = 50000
+    if(actors.size > MAX_AUTHORS_PER_ITERATION) {
+      console.warn(`GrapeRank : nostr interpreter : WARNING : ${actors.size} authors exceeds limit of ${MAX_AUTHORS_PER_ITERATION}. Truncating to prevent OOM.`)
+      const truncatedActors = [...actors].slice(0, MAX_AUTHORS_PER_ITERATION)
+      actors = new Set(truncatedActors)
+    }
+    
     // actorslists is actors broken into an array of list, 
     // where each list is maximum size allowed for relay requests
     const actorslists = actors.size > maxfetch ? sliceBigArray([...actors], maxfetch) : [[...actors]]
