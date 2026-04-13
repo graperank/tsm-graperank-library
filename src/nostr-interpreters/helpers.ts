@@ -48,12 +48,16 @@ export async function fetchEvents(
             events.set(dedupKey, event);
         };
 
-        const pool = new SimplePool()
+        // Disable signature verification to handle large events that may timeout
+        const pool = new SimplePool({ verifyEvent: false })
 
         let h = pool.subscribeMany(
           [...relays],filters,
           {
-            onevent : onEvent,
+            onevent(event: NostrEvent) {
+              console.log("fetchEvents onevent triggered for event:", event.id?.substring(0, 8), "kind:", event.kind)
+              onEvent(event);
+            },
             oneose() {
               if (!eoseReceived) {
                 console.log("fetchEvents first EOSE received, waiting 2s for other relays...")
@@ -64,6 +68,9 @@ export async function fetchEvents(
                   closeAndResolve();
                 }, 2000);
               }
+            },
+            onclose(reasons: string[]) {
+              console.log("fetchEvents subscription closed by relay, reasons:", reasons)
             }
           }
         )
