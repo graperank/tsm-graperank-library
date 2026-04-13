@@ -255,7 +255,7 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     console.log("GrapeRank : nostr interpreter : fetching events in request ",iteration, " for ",filter.authors?.length, " actors from relays:", relays, "relays length:", relays.length, "relays JSON:", JSON.stringify(relays))
     return new Promise((resolve)=>{
       fetchEvents(filter, NostrInterpreterClass.relays).then(async (newFetchedSet)=>{
-        let validation = true // this.validate ? this.validate(newFetchedSet, filter.authors as string[], fetchedSet) : true
+        let validation = this.validate ? this.validate(newFetchedSet, filter.authors as string[], fetchedSet) : true
         try{
 
           // FALSE validation will log error
@@ -267,14 +267,14 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
           if(validation === true){ 
             // fetchedSet = new Set([...fetchedSet, ...newFetchedSet])
             newFetchedSet.forEach((event)=>{ fetchedSet.add(event) })
-            throw("fetched " + newFetchedSet.size + " new events, for total of "+ fetchedSet.size)
+            console.log("GrapeRank : nostr interpreter : fetch request ",iteration," complete : fetched ", newFetchedSet.size, " new events, for total of ", fetchedSet.size)
+          } else if (Array.isArray(validation)) {
+            // validation returned array of authors to retry with
+            console.log("GrapeRank : nostr interpreter : fetch request ",iteration," : requesting again with reduced authors")
+            await this.fetchEventsPromise(
+              {...filter, authors : validation}, fetchedSet,
+              iteration )
           }
-
-          // otherwise try request again with reduced authors list
-          console.log("GrapeRank : nostr interpreter : fetch request ",iteration," : requesting again")
-          await this.fetchEventsPromise(
-            {...filter, authors : validation as string[]}, fetchedSet,
-            iteration )
 
         }catch(e){
           console.log("GrapeRank : nostr interpreter : fetch request  ",iteration," complete : ", e)
