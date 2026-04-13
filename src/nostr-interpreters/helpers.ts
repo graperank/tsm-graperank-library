@@ -129,6 +129,7 @@ async function fetchEventsRaw(
                 connections.push(ws)
 
                 ws.on('open', () => {
+                    console.log(`fetchEventsRaw connected to ${relay}, sending filter:`, JSON.stringify(filters))
                     ws.send(JSON.stringify(['REQ', subscriptionId, filters]))
                 })
 
@@ -164,6 +165,10 @@ async function fetchEventsRaw(
 
                 ws.on('error', (err: Error) => {
                     console.error("fetchEventsRaw WebSocket error for", relay, ":", err.message)
+                })
+
+                ws.on('close', (code: number, reason: Buffer) => {
+                    console.log(`fetchEventsRaw connection closed to ${relay}, code: ${code}, reason: ${reason.toString()}`)
                 })
             } catch (err) {
                 console.error("fetchEventsRaw failed to connect to", relay, ":", err)

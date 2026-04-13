@@ -255,7 +255,7 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     console.log("GrapeRank : nostr interpreter : fetching events in request ",iteration, " for ",filter.authors?.length, " actors from relays:", relays, "relays length:", relays.length, "relays JSON:", JSON.stringify(relays))
     return new Promise((resolve)=>{
       fetchEvents(filter, NostrInterpreterClass.relays).then(async (newFetchedSet)=>{
-        let validation = this.validate ? this.validate(newFetchedSet, filter.authors as string[], fetchedSet) : true
+        let validation = this.validate ? this.validate(newFetchedSet, filter.authors, fetchedSet) : true
         try{
 
           // FALSE validation will log error
