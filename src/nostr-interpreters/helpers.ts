@@ -24,6 +24,17 @@ export async function fetchEvents(
     console.log("fetchEvents called with relays:", relays, "relays length:", relays.length, "filters:", JSON.stringify(filters))
     return new Promise((resolve) => {
         const events: Map<string, NostrEvent> = new Map();
+        let eoseReceived = false;
+        let closed = false;
+
+        const closeAndResolve = () => {
+            if (closed) return;
+            closed = true;
+            console.log("fetchEvents closing with", events.size, "events")
+            h.close()
+            pool.close(relays)
+            resolve(new Set(events.values()));
+        };
 
         const onEvent = (event: NostrEvent) => {
             console.log("fetchEvents onEvent called, event kind:", event.kind, "id:", event.id.substring(0, 8))
@@ -44,13 +55,26 @@ export async function fetchEvents(
           {
             onevent : onEvent,
             oneose() {
-              console.log("fetchEvents EOSE received, closing with", events.size, "events")
-              h.close()
-              pool.close(relays)
-              resolve(new Set(events.values()));
+              if (!eoseReceived) {
+                console.log("fetchEvents first EOSE received, waiting 2s for other relays...")
+                eoseReceived = true;
+                
+                // Wait 2 more seconds for other relays to respond after first EOSE
+                setTimeout(() => {
+                  closeAndResolve();
+                }, 2000);
+              }
             }
           }
         )
+
+        // Absolute timeout: close after 12 seconds even if no EOSE received
+        setTimeout(() => {
+            if (!closed) {
+                console.log("fetchEvents absolute timeout reached, closing with", events.size, "events")
+                closeAndResolve();
+            }
+        }, 12000);
     });
 }
 
