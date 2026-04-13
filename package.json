@@ -43,7 +43,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "nostr-tools": "^2.7.2",
+    "nostr-tools": "^2.23.3",
     "ws": "^8.18.0"
   },
   "devDependencies": {
