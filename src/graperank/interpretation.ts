@@ -4,13 +4,19 @@ import { normalizePov } from "../nostr-interpreters/helpers"
 
 
 export class InterpretationController {
-  private stopping : boolean = false
+  private interpreters: InterpretersMap
+  private updateStatus?: (status: InterpreterStatus) => Promise<boolean>
+  private onKeepAlive?: () => void
+  private stopping = false
+
   constructor(
-    private interpreters : InterpretersMap,
-    private updateStatus? : (status : InterpreterStatus) => Promise<boolean>
-  ){}
-  stop(){
-    this.stopping = true
+    interpreters: InterpretersMap,
+    updateStatus?: (status: InterpreterStatus) => Promise<boolean>,
+    onKeepAlive?: () => void
+  ) {
+    this.interpreters = interpreters
+    this.updateStatus = updateStatus
+    this.onKeepAlive = onKeepAlive
   }
   async interpret(input : InterpretationInput) : Promise<InterpretationOutput | undefined>{
     const { type, pov, requests } = input
@@ -60,6 +66,10 @@ export class InterpretationController {
 
         while(currentIteration < maxIterations){
           if(this.stopping) return undefined
+          // Send keep-alive to prevent SSE timeout during long interpretation
+          if(this.onKeepAlive && currentIteration % 2 === 0) {
+            this.onKeepAlive()
+          }
           // increment for each interpreter iteration
           currentIteration ++
           currentActors = requestActors || ( newActors?.size ?  newActors : new Set(allActors.keys()) )

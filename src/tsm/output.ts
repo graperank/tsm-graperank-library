@@ -87,7 +87,8 @@ export async function executeServiceRequest(
     const interpretersMap = new InterpretersMap([InterpreterFactory])
     const interpretationController = new InterpretationController(
       interpretersMap,
-      onInterpreterStatus
+      onInterpreterStatus,
+      callbacks?.onKeepAlive
     )
 
     await sendFeedback(
