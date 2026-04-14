@@ -2,7 +2,7 @@ import { NostrEvent } from '../lib/nostr-tools'
 import { InterpretationController, InterpretersMap } from '../graperank/interpretation'
 import { CalculationController } from '../graperank/calculation'
 import { InterpreterFactory } from '../nostr-interpreters/factory'
-import { UnsignedEvent } from './types'
+import { UnsignedEvent, MetricsCollector, RequestMetrics } from './types'
 import { ParsedServiceRequest } from './requests'
 import { InterpreterStatus, CalculatorIterationStatus } from '../graperank/types'
 
@@ -45,9 +45,11 @@ export async function executeServiceRequest(
   const { requestEvent, parsedRequest, callbacks, pageSize, pageNumber, verboseFeedback } = config
   const { interpretationInput, calculatorParams } = parsedRequest
 
+  const metrics = new MetricsCollector(requestEvent.id)
+
   const onInterpreterStatus = async (status: InterpreterStatus): Promise<boolean> => {
     if (verboseFeedback && callbacks?.onFeedbackEvent) {
-      const message = `Interpreter ${status.interpreterId}${status.dos ? ` (DOS ${status.dos})` : ''}: ${status.authors} authors${status.fetched ? `, fetched ${status.fetched[0]} events in ${status.fetched[1]}ms` : ''}${status.interpreted ? `, interpreted ${status.interpreted[0]} interactions in ${status.interpreted[1]}ms` : ''}`
+      const message = `Interpreter ${status.interpreterId} DOS ${status.dos || 0}: ${status.authors} actors, ${status.fetched?.[0] || 0} events fetched (${status.fetched?.[1] || 0}ms), ${status.interpreted?.[0] || 0} interactions interpreted (${status.interpreted?.[1] || 0}ms)`
       await sendFeedback(requestEvent, 'info', message, callbacks.onFeedbackEvent)
     }
     return true
@@ -60,7 +62,7 @@ export async function executeServiceRequest(
         { calculated?: number; uncalculated?: number; average?: number }
       ]>
       const message = `Calculator iteration: ${statusEntries.map(([dos, data]) => 
-        `DOS ${dos}: ${data.calculated || 0} calculated, ${data.uncalculated || 0} pending, avg rank ${data.average?.toFixed(4) || 0}`
+        `DOS ${dos}: ${data.calculated || 0} converged, ${data.uncalculated || 0} calculating, avg rank ${data.average?.toFixed(4) || 0}`
       ).join('; ')}`
       await sendFeedback(requestEvent, 'info', message, callbacks.onFeedbackEvent)
     }
@@ -68,7 +70,7 @@ export async function executeServiceRequest(
 
   const onComplete = async (): Promise<void> => {
     if (verboseFeedback && callbacks?.onFeedbackEvent) {
-      await sendFeedback(requestEvent, 'info', 'Calculation iterations complete', callbacks.onFeedbackEvent)
+      await sendFeedback(requestEvent, 'info', 'Calculator iterations complete', callbacks.onFeedbackEvent)
     }
   }
 
@@ -76,9 +78,11 @@ export async function executeServiceRequest(
     await sendFeedback(
       requestEvent,
       'info',
-      'Starting service request processing',
+      `Request ${requestEvent.id.slice(0, 8)}: Processing started`,
       callbacks?.onFeedbackEvent
     )
+
+    metrics.startPhase('interpretation')
 
     const interpretersMap = new InterpretersMap([InterpreterFactory])
     const interpretationController = new InterpretationController(
@@ -89,7 +93,7 @@ export async function executeServiceRequest(
     await sendFeedback(
       requestEvent,
       'info',
-      'Starting interpretation phase',
+      'Interpretation phase started',
       callbacks?.onFeedbackEvent
     )
 
@@ -101,10 +105,13 @@ export async function executeServiceRequest(
 
     const { interactions, responses, pov } = interpretationOutput
 
+    metrics.setInterpretationTotals(interactions.length, responses.length)
+    metrics.endPhase()
+
     await sendFeedback(
       requestEvent,
       'success',
-      `Interpretation complete: ${interactions.length} interactions from ${responses.length} interpreters`,
+      `Interpretation completed: ${interactions.length} interactions from ${responses.length} interpreters`,
       callbacks?.onFeedbackEvent
     )
 
@@ -118,10 +125,12 @@ export async function executeServiceRequest(
       return
     }
 
+    metrics.startPhase('calculation')
+
     await sendFeedback(
       requestEvent,
       'info',
-      'Starting calculation phase',
+      'Calculation phase started',
       callbacks?.onFeedbackEvent
     )
 
@@ -135,12 +144,17 @@ export async function executeServiceRequest(
 
     const rankings = await calculationController.calculate()
 
+    metrics.setCalculationTotals(rankings.length)
+    metrics.endPhase()
+
     await sendFeedback(
       requestEvent,
       'success',
-      `Calculation complete: ${rankings.length} rankings generated`,
+      `Calculation completed: ${rankings.length} rankings generated`,
       callbacks?.onFeedbackEvent
     )
+
+    metrics.startPhase('output')
 
     const totalPages = pageSize && pageSize > 0 ? Math.ceil(rankings.length / pageSize) : 1
     const startPage = pageNumber !== undefined ? pageNumber : 1
@@ -167,7 +181,7 @@ export async function executeServiceRequest(
       await sendFeedback(
         requestEvent,
         'info',
-        `Generating output page ${page}: ${rankingsToOutput.length} rankings`,
+        `Output page ${page}/${totalPages}: ${rankingsToOutput.length} rankings`,
         callbacks?.onFeedbackEvent
       )
 
@@ -186,11 +200,17 @@ export async function executeServiceRequest(
       }
     }
 
+    metrics.setOutputTotals(totalPages, rankings.length)
+    metrics.endPhase()
+
+    const finalMetrics = metrics.finalize()
+    
     await sendFeedback(
       requestEvent,
       'success',
-      `Service request completed successfully: ${totalPages} page(s) generated`,
-      callbacks?.onFeedbackEvent
+      `Request ${requestEvent.id.slice(0, 8)}: Completed successfully (${totalPages} page(s), ${rankings.length} rankings)`,
+      callbacks?.onFeedbackEvent,
+      finalMetrics
     )
 
   } catch (error) {
@@ -200,7 +220,7 @@ export async function executeServiceRequest(
     await sendFeedback(
       requestEvent,
       'error',
-      `Error during ${stage}: ${errorMessage}`,
+      `${stage} error: ${errorMessage}`,
       callbacks?.onFeedbackEvent
     )
     
@@ -211,7 +231,8 @@ export async function executeServiceRequest(
 export function generateFeedbackEvent(
   requestEvent: NostrEvent,
   type: FeedbackEventType,
-  message: string
+  message: string,
+  metrics?: RequestMetrics
 ): UnsignedEvent {
   const tags: string[][] = [
     ['e', requestEvent.id, '', 'request'],
@@ -219,6 +240,11 @@ export function generateFeedbackEvent(
     ['k', String(requestEvent.kind)],
     ['status', type]
   ]
+
+  // Add structured metrics as a tag if provided
+  if (metrics) {
+    tags.push(['metrics', JSON.stringify(metrics)])
+  }
 
   return {
     kind: 7000,
@@ -292,11 +318,12 @@ async function sendFeedback(
   requestEvent: NostrEvent,
   type: FeedbackEventType,
   message: string,
-  callback?: (event: UnsignedEvent) => void | Promise<void>
+  callback?: (event: UnsignedEvent) => void | Promise<void>,
+  metrics?: RequestMetrics
 ): Promise<void> {
   if (!callback) return
 
-  const feedbackEvent = generateFeedbackEvent(requestEvent, type, message)
+  const feedbackEvent = generateFeedbackEvent(requestEvent, type, message, metrics)
   await callback(feedbackEvent)
 }
 

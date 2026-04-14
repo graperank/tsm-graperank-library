@@ -3,6 +3,8 @@ import { InterpreterRequest } from '../graperank/types'
 // Unsigned event type = NostrEvent - `sig` and `id`
 export type UnsignedEvent = Omit<NostrEvent, 'sig' | 'id' | 'pubkey'>
 
+export * from './metrics'
+
 
 export type ServiceAnnouncementConfig = {
   identifier: string
