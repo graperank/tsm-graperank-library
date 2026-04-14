@@ -39,7 +39,6 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@graperank/nostr-interpreters": "^1.0.0",
     "nostr-tools": "^2.23.3",
     "ws": "^8.18.0"
   },
