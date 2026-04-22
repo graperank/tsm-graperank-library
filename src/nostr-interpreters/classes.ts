@@ -126,6 +126,23 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     }
   }
 
+  private isAllowedType(requestedType: NostrType): boolean {
+    const allowedTypes = [...this.allowedActorTypes, ...this.allowedSubjectTypes] as NostrType[]
+    if (allowedTypes.includes(requestedType)) {
+      return true
+    }
+
+    if (isPubkeyType(requestedType) && allowedTypes.some((allowedType) => isPubkeyType(allowedType))) {
+      return true
+    }
+
+    if (isEventType(requestedType) && allowedTypes.some((allowedType) => isEventType(allowedType))) {
+      return true
+    }
+
+    return false
+  }
+
   private async fetchEventsWithRetry(filter: NostrFilter, relays: string[]): Promise<Set<NostrEvent>> {
     if (!relays.length) {
       return new Set()
@@ -345,13 +362,14 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
       return this.povActorContext
     }
 
-    if(!this.allowedActorTypes.includes(type as NostrType) && !this.allowedSubjectTypes.includes(type as NostrType)) {
+    const requestedType = type as NostrType
+
+    if (!this.isAllowedType(requestedType)) {
       throw new Error(`GrapeRank : ${this.interpreterId} : resolvePovContext : type '${type}' not allowed`)
     }
 
     const rankedActorMap = new Map<actorId, number | undefined>()
     const eventActorReferenceMap = new Map<actorId, EventActorReference>()
-    const requestedType = type as NostrType
     let actorMode: 'pubkey' | 'event' = 'pubkey'
     const povArray = Array.isArray(pov) ? pov : [pov]
 
@@ -445,11 +463,12 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     const actors: Set<actorId> = new Set()
     
     if(type && pov) {
-      if(!this.allowedActorTypes.includes(type as NostrType) && !this.allowedSubjectTypes.includes(type as NostrType)) {
+      const requestedType = type as NostrType
+
+      if (!this.isAllowedType(requestedType)) {
         throw new Error(`GrapeRank : ${this.interpreterId} : resolveActors : type '${type}' not allowed`)
       }
-      
-      const requestedType = type as NostrType
+
       const povArray = Array.isArray(pov) ? pov : [pov]
       
       for(const povItem of povArray) {

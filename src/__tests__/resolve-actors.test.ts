@@ -118,6 +118,40 @@ describe('NostrInterpreterClass.resolveActors', () => {
     expect([...actors].sort()).toEqual([referencedEventAuthor, referencedEventAuthor2].sort())
   })
 
+  test('accepts pubkey requested type when interpreter allows only p/P aliases', async () => {
+    const npubDecodedPubkey = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
+
+    jest.spyOn(nostrTools, 'decode').mockImplementation((value: string) => {
+      if (value === 'npub1alias') {
+        return {
+          type: 'npub',
+          data: npubDecodedPubkey,
+        } as any
+      }
+
+      throw new Error(`Unexpected decode value ${value}`)
+    })
+
+    const aliasOnlyInterpreter = new NostrInterpreterClass({
+      interpretKind: 9735,
+      fetchKinds: [9735],
+      label: 'Alias-only pubkey interpreter',
+      description: 'Validates pubkey alias compatibility',
+      allowedActorTypes: ['p', 'P'],
+      allowedSubjectTypes: ['p', 'P'],
+      defaultParams: {
+        value: 1,
+        confidence: 1,
+        actorType: 'P',
+        subjectType: 'p',
+      },
+    })
+
+    const actors = await aliasOnlyInterpreter.resolveActors('pubkey', 'npub1alias')
+
+    expect([...actors]).toEqual([npubDecodedPubkey])
+  })
+
   test('uses fallback resolution for event fields (id) rather than source event ids', async () => {
     jest.spyOn(nostrTools, 'decode').mockImplementation((value: string) => {
       if (value === 'naddr1root') {
