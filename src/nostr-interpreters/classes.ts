@@ -11,6 +11,7 @@ useWebSocketImplementation(WebSocket)
 const delaybetweenfetches = 500 // milliceconds
 const fetchRetryAttempts = 3
 const fetchRetryBackoffMs = 250
+const eventActorFetchConcurrency = 20
 const eventIdField: NostrEventField = NostrEventFields[0]
 const eventIdReferenceType = EventReferenceTypes[0]
 export class NostrInterpreterFactory extends InterpreterFactory<"nostr"> {
@@ -571,34 +572,52 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   private async fetchDataByEventActors(actors: Set<actorId>): Promise<number> {
     const fetchedSet: Set<NostrEvent> = new Set()
     const eventActorBindings: EventActorBindings = new Map()
+    const eventActorIds = [...actors]
 
-    for (const eventActorId of actors) {
-      const eventActorReference = this.povActorContext?.eventActorReferenceMap?.get(eventActorId) || parseEventActorId(eventActorId)
-      if (!eventActorReference) continue
-
-      const relays = mergeRelayLists(eventActorReference.relayHints, NostrInterpreterClass.relays)
-      if (!relays.length) continue
-
-      const eventActorReferenceFilters = this.buildEventActorReferenceFetchFilters(eventActorReference)
-      for (const filter of eventActorReferenceFilters) {
-        await new Promise<void>((resolve)=>{
-          setTimeout(()=> resolve(), delaybetweenfetches)
-        })
-
-        const fetchedEvents = await this.fetchEventsWithRetry(filter, relays)
-        for (const event of fetchedEvents) {
-          fetchedSet.add(event)
-
-          let bindings = eventActorBindings.get(event.id)
-          if (!bindings) {
-            bindings = new Set<actorId>()
-            eventActorBindings.set(event.id, bindings)
-          }
-
-          bindings.add(eventActorId)
-        }
-      }
+    if (eventActorIds.length === 0) {
+      const dos = this.fetched.push(fetchedSet)
+      this.eventActorBindingsByDos[dos - 1] = eventActorBindings
+      return dos
     }
+
+    const workerCount = Math.min(eventActorFetchConcurrency, eventActorIds.length)
+    const workerPromises: Promise<void>[] = []
+
+    for (let workerIndex = 0; workerIndex < workerCount; workerIndex++) {
+      workerPromises.push((async () => {
+        for (let eventActorIndex = workerIndex; eventActorIndex < eventActorIds.length; eventActorIndex += workerCount) {
+          const eventActorId = eventActorIds[eventActorIndex]
+          const eventActorReference = this.povActorContext?.eventActorReferenceMap?.get(eventActorId) || parseEventActorId(eventActorId)
+          if (!eventActorReference) continue
+
+          const relays = mergeRelayLists(eventActorReference.relayHints, NostrInterpreterClass.relays)
+          if (!relays.length) continue
+
+          const eventActorReferenceFilters = this.buildEventActorReferenceFetchFilters(eventActorReference)
+
+          await sleep(delaybetweenfetches)
+          const fetchedEventSets = await Promise.all(
+            eventActorReferenceFilters.map((filter) => this.fetchEventsWithRetry(filter, relays))
+          )
+
+          for (const fetchedEvents of fetchedEventSets) {
+            for (const event of fetchedEvents) {
+              fetchedSet.add(event)
+
+              let bindings = eventActorBindings.get(event.id)
+              if (!bindings) {
+                bindings = new Set<actorId>()
+                eventActorBindings.set(event.id, bindings)
+              }
+
+              bindings.add(eventActorId)
+            }
+          }
+        }
+      })())
+    }
+
+    await Promise.all(workerPromises)
 
     const dos = this.fetched.push(fetchedSet)
     this.eventActorBindingsByDos[dos - 1] = eventActorBindings
