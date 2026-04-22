@@ -9,6 +9,7 @@ describe('TSM Output Generators', () => {
     created_at: Math.floor(Date.now() / 1000),
     kind: 37572,
     tags: [
+      ['d', 'request-dtag'],
       ['config', 'pov', '"npub1test"'],
       ['config', 'interpreters', '[{"id":"nostr-3"}]']
     ],
@@ -65,6 +66,9 @@ describe('TSM Output Generators', () => {
   })
 
   describe('generateRankingOutputEvent', () => {
+    const getRankingTags = (output: UnsignedEvent, rankingTagName = 'p'): string[][] =>
+      output.tags.filter((tag: string[]) => tag[0] === rankingTagName && tag.length === 4)
+
     test('should generate kind 37573 ranking output event', () => {
       const rankings: [string, { rank?: number; confidence?: number }][] = [
         ['subject1', { rank: 0.95, confidence: 0.85 }],
@@ -97,12 +101,54 @@ describe('TSM Output Generators', () => {
         rankings
       )
 
-      const resultTag = output.tags.find((t: string[]) => t[0] === 'result')
-      expect(resultTag).toBeDefined()
-      expect(resultTag![1]).toBe('subject1')
-      expect(resultTag![2]).toBe('0.123457') // rank with 6 decimals
-      expect(resultTag![3]).toBe('0.9876') // confidence with 4 decimals
-      expect(resultTag![4]).toBe('0') // index
+      const rankingTag = output.tags.find((tag: string[]) => tag[0] === 'p' && tag[1] === 'subject1')
+      expect(rankingTag).toBeDefined()
+      expect(rankingTag![2]).toBe('0.123457')
+      expect(rankingTag![3]).toBe('0.9876')
+    })
+
+    test('should canonicalize config:type pubkey to p output tags', () => {
+      const requestEventWithPubkeyType: NostrEvent = {
+        ...mockRequestEvent,
+        tags: [
+          ['config', 'type', 'pubkey'],
+          ['config', 'pov', '"npub1test"'],
+        ],
+      }
+
+      const rankings: [string, { rank?: number; confidence?: number }][] = [
+        ['subject1', { rank: 0.5, confidence: 0.8 }],
+      ]
+
+      const output = generateRankingOutputEvent(requestEventWithPubkeyType, rankings)
+
+      const pTags = output.tags.filter((tag) => tag[0] === 'p' && tag[1] === 'subject1')
+      const pubkeyTags = output.tags.filter((tag) => tag[0] === 'pubkey')
+
+      expect(pTags.length).toBe(1)
+      expect(pubkeyTags.length).toBe(0)
+    })
+
+    test('should canonicalize config:type P to p output tags', () => {
+      const requestEventWithUppercasePType: NostrEvent = {
+        ...mockRequestEvent,
+        tags: [
+          ['config', 'type', 'P'],
+          ['config', 'pov', '"npub1test"'],
+        ],
+      }
+
+      const rankings: [string, { rank?: number; confidence?: number }][] = [
+        ['subject1', { rank: 0.9, confidence: 0.7 }],
+      ]
+
+      const output = generateRankingOutputEvent(requestEventWithUppercasePType, rankings)
+
+      const pTags = output.tags.filter((tag) => tag[0] === 'p' && tag[1] === 'subject1')
+      const uppercasePTags = output.tags.filter((tag) => tag[0] === 'P')
+
+      expect(pTags.length).toBe(1)
+      expect(uppercasePTags.length).toBe(0)
     })
 
     test('should handle undefined rank and confidence with defaults', () => {
@@ -115,9 +161,10 @@ describe('TSM Output Generators', () => {
         rankings
       )
 
-      const resultTag = output.tags.find((t: string[]) => t[0] === 'result')
-      expect(resultTag![2]).toBe('0.000000')
-      expect(resultTag![3]).toBe('0.0000')
+      const rankingTag = output.tags.find((tag: string[]) => tag[0] === 'p' && tag[1] === 'subject1')
+      expect(rankingTag).toBeDefined()
+      expect(rankingTag![2]).toBe('0.000000')
+      expect(rankingTag![3]).toBe('0.0000')
     })
 
     test('should include pagination info when provided', () => {
@@ -135,9 +182,25 @@ describe('TSM Output Generators', () => {
         }
       )
 
-      expect(output.tags).toContainEqual(['total', '100'])
-      expect(output.tags).toContainEqual(['page-size', '10'])
-      expect(output.tags).toContainEqual(['page', '2'])
+      expect(output.tags).toContainEqual(['v', 'total:100'])
+      expect(output.tags).toContainEqual(['v', 'page-size:10'])
+      expect(output.tags).toContainEqual([
+        'v',
+        'page:2',
+        JSON.stringify([
+          'request-dtag',
+          'request-dtag:2',
+          'request-dtag:3',
+          'request-dtag:4',
+          'request-dtag:5',
+          'request-dtag:6',
+          'request-dtag:7',
+          'request-dtag:8',
+          'request-dtag:9',
+          'request-dtag:10',
+        ]),
+      ])
+      expect(output.tags).toContainEqual(['d', 'request-dtag:2'])
     })
 
     test('should omit optional pagination fields when not provided', () => {
@@ -153,9 +216,10 @@ describe('TSM Output Generators', () => {
         }
       )
 
-      expect(output.tags).toContainEqual(['total', '100'])
-      expect(output.tags.find((t: string[]) => t[0] === 'page-size')).toBeUndefined()
-      expect(output.tags.find((t: string[]) => t[0] === 'page')).toBeUndefined()
+      expect(output.tags).toContainEqual(['v', 'total:100'])
+      expect(output.tags.find((tag: string[]) => tag[0] === 'v' && tag[1].startsWith('page-size:'))).toBeUndefined()
+      expect(output.tags.find((tag: string[]) => tag[0] === 'v' && tag[1].startsWith('page:'))).toBeUndefined()
+      expect(output.tags).toContainEqual(['d', undefined])
     })
 
     test('should handle multiple rankings with correct indices', () => {
@@ -170,11 +234,11 @@ describe('TSM Output Generators', () => {
         rankings
       )
 
-      const resultTags = output.tags.filter((t: string[]) => t[0] === 'result')
-      expect(resultTags).toHaveLength(3)
-      expect(resultTags[0][4]).toBe('0')
-      expect(resultTags[1][4]).toBe('1')
-      expect(resultTags[2][4]).toBe('2')
+      const rankingTags = getRankingTags(output)
+      expect(rankingTags).toHaveLength(3)
+      expect(rankingTags[0][1]).toBe('subject1')
+      expect(rankingTags[1][1]).toBe('subject2')
+      expect(rankingTags[2][1]).toBe('subject3')
     })
 
     test('should handle empty rankings array', () => {
@@ -185,8 +249,8 @@ describe('TSM Output Generators', () => {
         rankings
       )
 
-      const resultTags = output.tags.filter((t: string[]) => t[0] === 'result')
-      expect(resultTags).toHaveLength(0)
+      const rankingTags = getRankingTags(output)
+      expect(rankingTags).toHaveLength(0)
     })
   })
 })

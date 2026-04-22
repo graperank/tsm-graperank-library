@@ -20,14 +20,23 @@ export const NostrMultiLetterTags = [
 ] as const
 export type NostrMultiLetterTag = typeof NostrMultiLetterTags[number]
 
-export const PubkeyTypes : NostrType[] = ["pubkey", "p", "P"]
+export const PubkeyTagTypes = ["p", "P"] as const
+export type PubkeyTagType = typeof PubkeyTagTypes[number]
+
+export const PubkeyTypes = ["pubkey", ...PubkeyTagTypes] as const
 export type PubkeyType = typeof PubkeyTypes[number]
 
-export const EventTypes : NostrType[] = ["id", "e", "a", "q"]
+export const EventReferenceTypes = ["e", "a"] as const
+export type EventReferenceType = typeof EventReferenceTypes[number]
+
+export const EventTagTypes = ["q", ...EventReferenceTypes] as const
+export type EventTagType = typeof EventTagTypes[number]
+
+export const EventTypes = ["id", ...EventTagTypes] as const
 export type EventType = typeof EventTypes[number]
 
 export type EventReferenceTarget = {
-  referenceType: 'id' | 'a'
+  referenceType: EventReferenceType
   value: string
   relayHints: string[]
 }

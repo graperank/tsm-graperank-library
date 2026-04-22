@@ -28,6 +28,22 @@ function getAttestationSubjectPubkey(event: NostrEvent): string | undefined {
   return undefined
 }
 
+function getActorsForEvent(
+  instance: NostrInterpreterClass<NostrInterpreterParams>,
+  dos: number,
+  event: NostrEvent,
+  actorType: NostrType,
+): actorId[] {
+  const eventActorBindings = instance.getEventActorBindings(dos)
+  const boundActors = eventActorBindings?.get(event.id)
+  if (boundActors && boundActors.size > 0) {
+    return [...boundActors]
+  }
+
+  const extractedActor = getEventActor(actorType, event)
+  return extractedActor ? [extractedActor] : []
+}
+
 // A generic callback for interpreting interactions from individual tags
 // where each tag represents a single actor/subject interaction in an event,
 // and where one tag index is the subject id and another is the actor's interaction,
@@ -65,9 +81,10 @@ export async function applyInteractionsByTag(instance : NostrInterpreterClass<No
   
   for(let event of fetchedSet) {
     console.log("GrapeRank : nostr interpreter : applyInteractionsByTag : event", event.id.substring(0, 8), "kind", event.kind, "tags:", event.tags?.length || 0)
-    let actor = getEventActor(actorType, event)
-    if(!actor) continue
-    const actorInteractions = new Map<string, InteractionData>()
+    const eventActors = getActorsForEvent(instance, dos, event, actorType)
+    if(!eventActors.length) continue
+
+    const eventInteractions = new Map<subjectId, InteractionData>()
     eventindex ++
     
     // DoS prevention: Skip events with excessive tags (potential attack vector)
@@ -79,7 +96,7 @@ export async function applyInteractionsByTag(instance : NostrInterpreterClass<No
         let subject = getEventSubject(subjectType, event, tag, subjectIndex)
         if(!subject) continue
         
-        if(actorInteractions.has(subject)) {
+        if(eventInteractions.has(subject)) {
           duplicateInteractions ++
           continue
         }
@@ -89,15 +106,32 @@ export async function applyInteractionsByTag(instance : NostrInterpreterClass<No
           value = instance.params[tag[interactionIndex]] as number
         }
 
-        actorInteractions.set(subject, {confidence, value, dos})
-        totalInteractions ++
+        eventInteractions.set(subject, {confidence, value, dos})
         }
       }
     // }else{
     //   console.log("GrapeRank : nostr interpreter : applyInteractionsByTag : event not processed")
     // }
-    
-    newInteractionsMap.set(actor, actorInteractions)
+
+    if (!eventInteractions.size) continue
+
+    for (const eventActor of eventActors) {
+      let actorInteractions = newInteractionsMap.get(eventActor)
+      if(!actorInteractions) {
+        actorInteractions = new Map<string, InteractionData>()
+        newInteractionsMap.set(eventActor, actorInteractions)
+      }
+
+      eventInteractions.forEach((interactionData, subject) => {
+        if(actorInteractions!.has(subject)) {
+          duplicateInteractions ++
+          return
+        }
+
+        actorInteractions!.set(subject, interactionData)
+        totalInteractions ++
+      })
+    }
   }
 
   console.log("GrapeRank : nostr interpreter : applyInteractionsByTag : total interpreted ", totalInteractions, " new interactions and skipped ", duplicateInteractions, " duplicate interactions for ", newInteractionsMap.size, " actors in iteration ", fetchedIndex)

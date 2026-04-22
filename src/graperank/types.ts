@@ -1,3 +1,5 @@
+import type { PovActorContext } from './nostr-types'
+
 export type actorId = string
 export type subjectId = string
 export type povType = string
@@ -145,6 +147,8 @@ export interface Interpreter<ParamsType extends InterpreterParams> {
   // OR some interpreter specific reference to a collection of `type` formated strings
   // It should parse these `type` formatted strings and return a set of actor ids.
   resolveActors(type?: povType, pov?: string | string[]): Promise<Set<actorId> | undefined>
+  resolvePovContext?(type?: povType, pov?: string | string[]): Promise<PovActorContext | undefined>
+  setPovActorContext?(context?: PovActorContext): void
   // fetchData() fetches data from the network
   // This will be called once per interpreter iteration 
   // to fetch interactions initiated by the given actors

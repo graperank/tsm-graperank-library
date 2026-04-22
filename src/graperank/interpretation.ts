@@ -1,6 +1,7 @@
-import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput, RankedPov, UnrankedPov } from "./types"
+import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput } from "./types"
 import type { Interpreter, InterpreterInitializer, InterpreterParams } from "./types"
-import { normalizePov } from "../nostr-interpreters/helpers"
+import type { PovActorContext } from './nostr-types'
+import { deriveActorIdsFromRankedPov, normalizePov } from "../nostr-interpreters/helpers"
 
 
 export class InterpretationController {
@@ -31,7 +32,9 @@ export class InterpretationController {
 
     // Normalize POV to RankedPov format
     const normalizedPov = normalizePov(pov)
-    const povActorIds = normalizePov(pov).map(([actorId]) => actorId)
+    const povActorIds = normalizedPov.map(([rankedActorId]) => rankedActorId)
+    let outputPov = normalizedPov
+    let povActorContext: PovActorContext | undefined
 
     if(!!pov && !!requests){
       console.log("GrapeRank : interpret : instantiating ",requests.length, " interpreters for ",povActorIds.length," actors or subjects in pov")
@@ -45,7 +48,13 @@ export class InterpretationController {
         this.interpreters.setRequest(request)
         // resolve actors from pov
         if(!actors) {
-          actors = await this.interpreters.resolveActors(request.id, type, povActorIds)
+          povActorContext = await this.interpreters.resolvePovContext(request.id, type, povActorIds)
+          if (povActorContext) {
+            outputPov = povActorContext.rankedPov
+            this.interpreters.setPovActorContext(povActorContext)
+          }
+
+          actors = deriveActorIdsFromRankedPov(outputPov)
           if(!actors) throw new Error("GrapeRank : interpret : failed to resolve pov")
           // add input actors to allActors
           actors.forEach((actorId) => allActors.set(actorId,0))
@@ -177,7 +186,7 @@ export class InterpretationController {
       console.log('GrapeRank : ERROR in interpret() : no actorts && requests passed : ', actors, requests)
     }
     this.interpreters.clear()
-    return {interactions: outputInteractions, responses: outputResponses, pov: normalizedPov}
+    return {interactions: outputInteractions, responses: outputResponses, pov: outputPov}
 
   }
 
@@ -266,6 +275,16 @@ export class InterpretersMap extends Map<InterpreterId<any>, Interpreter<Interpr
 
   async resolveActors(interpreterId:InterpreterId<any>, type? : povType, pov? : string | string[]){
     return await this.get(interpreterId)?.resolveActors(type, pov)
+  }
+
+  async resolvePovContext(interpreterId: InterpreterId<any>, type?: povType, pov?: string | string[]) {
+    return await this.get(interpreterId)?.resolvePovContext?.(type, pov)
+  }
+
+  setPovActorContext(context?: PovActorContext): void {
+    this.forEach((interpreter) => {
+      interpreter.setPovActorContext?.(context)
+    })
   }
 
   async fetchData(interpreterId:InterpreterId<any>, actors?: Set<actorId>){

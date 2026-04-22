@@ -1,8 +1,9 @@
 import { NostrEvent, NostrFilter, npubEncode, decode, SimplePool, useWebSocketImplementation } from '../lib/nostr-tools'
-import { subjectId, Interpreter, InterpreterRequest, InteractionsMap, actorId, InterpreterInitializer, InterpreterParams, InterpreterId, InteractionData, povType } from "../graperank/types"
-import { EventReferenceTarget, EventTypes, NostrEventField, NostrEventFields, NostrInterpreterClassConfig, NostrInterpreterId, NostrInterpreterKeys, NostrInterpreterParams, NostrType } from "./types"
+import { RankedPov, subjectId, Interpreter, InterpreterRequest, InteractionsMap, actorId, InterpreterInitializer, InterpreterParams, InterpreterId, InteractionData, povType } from "../graperank/types"
+import { EventActorReference, EventActorBindings, PovActorContext } from '../graperank/nostr-types'
+import { EventReferenceTarget, EventReferenceTypes, NostrEventField, NostrEventFields, NostrInterpreterClassConfig, NostrInterpreterId, NostrInterpreterKeys, NostrInterpreterParams, NostrType } from "./types"
 import { applyInteractionsByTag } from "./callbacks"
-import { decodeEventReference, extractDTagValue, extractPaginationDTags, fetchEvents, hasEventReferenceTags, isRelayUrl, maxfetch, mergeRelayLists, parseCoordinate, sliceBigArray, sleep, validateNostrTypeValue } from "./helpers"
+import { buildEventActorId, decodeEventReference, deriveActorIdsFromRankedPov, extractDTagValue, extractPaginationDTags, extractReferenceTags, fetchEvents, hasEventReferenceTags, isEventType, isPubkeyType, isRelayUrl, maxfetch, mergeRelayLists, normalizeEventActorReference, parseCoordinate, parseEventActorId, parseReferenceRank, sliceBigArray, sleep, validateNostrTypeValue } from "./helpers"
 import WebSocket from 'ws'
 import { InterpreterFactory } from '../graperank/interpretation'
 useWebSocketImplementation(WebSocket)
@@ -10,6 +11,8 @@ useWebSocketImplementation(WebSocket)
 const delaybetweenfetches = 500 // milliceconds
 const fetchRetryAttempts = 3
 const fetchRetryBackoffMs = 250
+const eventIdField: NostrEventField = NostrEventFields[0]
+const eventIdReferenceType = EventReferenceTypes[0]
 export class NostrInterpreterFactory extends InterpreterFactory<"nostr"> {
   readonly namespace = "nostr"
   parseID = parseNostrInterpreterID
@@ -50,6 +53,8 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   
   fetched : Set<NostrEvent>[] = []
   interactions : InteractionsMap = new Map()
+  private povActorContext?: PovActorContext
+  private eventActorBindingsByDos: EventActorBindings[] = []
   interpret : (dos? : number) => Promise<InteractionsMap | undefined>
   validate? : 
   (events : Set<NostrEvent>, authors : actorId[], previous? : Set<NostrEvent>) 
@@ -109,6 +114,325 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     }
   }
 
+  private addRankedActor(rankedActorMap: Map<actorId, number | undefined>, actor: actorId, rank?: number): void {
+    if (!rankedActorMap.has(actor)) {
+      rankedActorMap.set(actor, rank)
+      return
+    }
+
+    const currentRank = rankedActorMap.get(actor)
+    if (currentRank === undefined && rank !== undefined) {
+      rankedActorMap.set(actor, rank)
+    }
+  }
+
+  private async fetchEventsWithRetry(filter: NostrFilter, relays: string[]): Promise<Set<NostrEvent>> {
+    if (!relays.length) {
+      return new Set()
+    }
+
+    for (let attempt = 1; attempt <= fetchRetryAttempts; attempt++) {
+      try {
+        const fetchedEvents = await fetchEvents(filter, relays)
+        if (fetchedEvents.size > 0) return fetchedEvents
+      } catch {
+        // MVP behavior: relay fetch failures are retried and then skipped silently.
+      }
+
+      if (attempt < fetchRetryAttempts) {
+        await sleep(fetchRetryBackoffMs * attempt)
+      }
+    }
+
+    return new Set()
+  }
+
+  private async resolvePaginatedAddressableEvents(
+    rootEvents: Set<NostrEvent>,
+    kind: number,
+    pubkey: string,
+    relays: string[],
+  ): Promise<Set<NostrEvent>> {
+    const allEvents = new Map<string, NostrEvent>()
+    const discoveredDTags = new Set<string>()
+    const pendingDTags = new Set<string>()
+
+    for (const rootEvent of rootEvents) {
+      allEvents.set(rootEvent.id, rootEvent)
+      const dTagValue = extractDTagValue(rootEvent)
+      if (dTagValue) discoveredDTags.add(dTagValue)
+    }
+
+    for (const event of allEvents.values()) {
+      const paginationDTags = extractPaginationDTags(event)
+      for (const dTagValue of paginationDTags) {
+        if (!discoveredDTags.has(dTagValue)) pendingDTags.add(dTagValue)
+      }
+    }
+
+    while (pendingDTags.size > 0) {
+      const nextBatch = [...pendingDTags]
+      pendingDTags.clear()
+      nextBatch.forEach(dTag => discoveredDTags.add(dTag))
+
+      const filter: NostrFilter = {
+        kinds: [kind],
+        authors: [pubkey],
+        '#d': nextBatch,
+      }
+
+      const pageEvents = await this.fetchEventsWithRetry(filter, relays)
+      for (const pageEvent of pageEvents) {
+        allEvents.set(pageEvent.id, pageEvent)
+
+        const dTagValue = extractDTagValue(pageEvent)
+        if (dTagValue) discoveredDTags.add(dTagValue)
+
+        const nestedDTags = extractPaginationDTags(pageEvent)
+        for (const nestedDTag of nestedDTags) {
+          if (!discoveredDTags.has(nestedDTag)) {
+            pendingDTags.add(nestedDTag)
+          }
+        }
+      }
+    }
+
+    return new Set(allEvents.values())
+  }
+
+  private extractActorsFromEvents(events: Set<NostrEvent>, requestedType: NostrType): Set<actorId> {
+    const extracted = new Set<actorId>()
+
+    for (const event of events) {
+      if (requestedType === 'pubkey') {
+        if (validateNostrTypeValue('pubkey', event.pubkey)) {
+          extracted.add(event.pubkey)
+        }
+        continue
+      }
+
+      if (requestedType === 'id') {
+        extracted.add(event.id)
+        continue
+      }
+
+      if (requestedType === 'kind') {
+        extracted.add(String(event.kind))
+        continue
+      }
+
+      for (const tag of event.tags) {
+        if (tag[0] === requestedType && tag[1] && validateNostrTypeValue(requestedType, tag[1])) {
+          extracted.add(tag[1])
+        }
+      }
+    }
+
+    return extracted
+  }
+
+  private collectReferenceTargets(events: Set<NostrEvent>): EventReferenceTarget[] {
+    const targets: EventReferenceTarget[] = []
+
+    for (const event of events) {
+      for (const tag of event.tags) {
+        const tagName = tag[0] as NostrType
+        if ((!isEventType(tagName) || tagName === eventIdField) || !tag[1]) continue
+
+        const decodedReference = decodeEventReference(tag[1])
+        if (!decodedReference) continue
+
+        const relayHintsFromTag = tag.slice(2).filter(value => typeof value === 'string' && isRelayUrl(value))
+        targets.push({
+          ...decodedReference,
+          relayHints: mergeRelayLists(decodedReference.relayHints, relayHintsFromTag),
+        })
+      }
+    }
+
+    return targets
+  }
+
+  private async fetchReferencedEvents(
+    sourceEvents: Set<NostrEvent>,
+    fallbackRelays: string[],
+  ): Promise<Map<string, NostrEvent>> {
+    const referencedEvents = new Map<string, NostrEvent>()
+    const referenceTargets = this.collectReferenceTargets(sourceEvents)
+
+    for (const target of referenceTargets) {
+      const targetRelays = mergeRelayLists(target.relayHints, fallbackRelays)
+      if (!targetRelays.length) continue
+
+      let filter: NostrFilter | undefined
+      if (target.referenceType === eventIdReferenceType) {
+        filter = { ids: [target.value] }
+      } else {
+        const coordinate = parseCoordinate(target.value)
+        if (!coordinate) continue
+        filter = {
+          kinds: [coordinate.kind],
+          authors: [coordinate.pubkey],
+          '#d': [coordinate.identifier],
+        }
+      }
+
+      const fetched = await this.fetchEventsWithRetry(filter, targetRelays)
+      for (const event of fetched) {
+        referencedEvents.set(event.id, event)
+      }
+    }
+
+    return referencedEvents
+  }
+
+  private async resolveActorsFromReferences(
+    sourceEvents: Set<NostrEvent>,
+    requestedType: NostrType,
+    fallbackRelays: string[],
+  ): Promise<Set<actorId>> {
+    const referencedEvents = await this.fetchReferencedEvents(sourceEvents, fallbackRelays)
+    return this.extractActorsFromEvents(new Set(referencedEvents.values()), requestedType)
+  }
+
+  private buildEventActorContext(sourceEvents: Set<NostrEvent>): PovActorContext | undefined {
+    const rankedActorMap = new Map<actorId, number | undefined>()
+    const eventActorReferenceMap = new Map<actorId, EventActorReference>()
+
+    for (const { sourceEvent, tag } of extractReferenceTags(sourceEvents)) {
+      const decodedReference = decodeEventReference(tag[1])
+      if (!decodedReference) continue
+
+      const relayHintsFromTag = tag.slice(2).filter(value => typeof value === 'string' && isRelayUrl(value))
+      const normalizedEventActorReference = normalizeEventActorReference({
+        ...decodedReference,
+        relayHints: mergeRelayLists(decodedReference.relayHints, relayHintsFromTag),
+      })
+      if (!normalizedEventActorReference) continue
+
+      const eventActorId = buildEventActorId(normalizedEventActorReference)
+      if (!eventActorId) continue
+
+      eventActorReferenceMap.set(eventActorId, normalizedEventActorReference)
+      this.addRankedActor(rankedActorMap, eventActorId, parseReferenceRank(sourceEvent, tag))
+    }
+
+    if (!rankedActorMap.size) return undefined
+
+    return {
+      actorMode: 'event',
+      rankedPov: [...rankedActorMap.entries()],
+      eventActorReferenceMap,
+    }
+  }
+
+  getPovActorContext(): PovActorContext | undefined {
+    return this.povActorContext
+  }
+
+  setPovActorContext(context?: PovActorContext): void {
+    this.povActorContext = context
+    this.eventActorBindingsByDos = []
+  }
+
+  getEventActorBindings(dos: number): EventActorBindings | undefined {
+    if (dos < 1) return undefined
+    return this.eventActorBindingsByDos[dos - 1]
+  }
+
+  async resolvePovContext(type?: povType, pov?: string | string[]): Promise<PovActorContext | undefined> {
+    if (!type || !pov) {
+      return this.povActorContext
+    }
+
+    if(!this.allowedActorTypes.includes(type as NostrType) && !this.allowedSubjectTypes.includes(type as NostrType)) {
+      throw new Error(`GrapeRank : ${this.interpreterId} : resolvePovContext : type '${type}' not allowed`)
+    }
+
+    const rankedActorMap = new Map<actorId, number | undefined>()
+    const eventActorReferenceMap = new Map<actorId, EventActorReference>()
+    const requestedType = type as NostrType
+    let actorMode: 'pubkey' | 'event' = 'pubkey'
+    const povArray = Array.isArray(pov) ? pov : [pov]
+
+    for(const povItem of povArray) {
+      try {
+        if(povItem.startsWith('naddr')) {
+          const decoded = decode(povItem)
+          if(decoded.type !== 'naddr') continue
+
+          const { kind, pubkey, identifier } = decoded.data
+          const naddrRelays = Array.isArray(decoded.data.relays)
+            ? decoded.data.relays.filter((relay): relay is string => typeof relay === 'string')
+            : []
+          const relays = mergeRelayLists(naddrRelays, NostrInterpreterClass.relays)
+
+          const filter: NostrFilter = {
+            kinds: [kind],
+            authors: [pubkey],
+            '#d': identifier ? [identifier] : undefined,
+          }
+
+          const rootEvents = await this.fetchEventsWithRetry(filter, relays)
+          const sourceEvents = await this.resolvePaginatedAddressableEvents(rootEvents, kind, pubkey, relays)
+          const sourceHasReferenceTags = hasEventReferenceTags(sourceEvents)
+          const shouldUseEventActors = !isEventType(requestedType) && sourceHasReferenceTags
+
+          if (shouldUseEventActors) {
+            const eventActorContext = this.buildEventActorContext(sourceEvents)
+            if (eventActorContext) {
+              actorMode = 'event'
+              eventActorContext.rankedPov.forEach(([rankedActorId, rank]) => this.addRankedActor(rankedActorMap, rankedActorId, rank))
+              eventActorContext.eventActorReferenceMap?.forEach((eventActorReference, rankedActorId) => {
+                if (!eventActorReferenceMap.has(rankedActorId)) {
+                  eventActorReferenceMap.set(rankedActorId, eventActorReference)
+                }
+              })
+            }
+            continue
+          }
+
+          const typeIsEventField = NostrEventFields.includes(requestedType as NostrEventField)
+          const shouldResolveFromReferences = typeIsEventField || (!isEventType(requestedType) && sourceHasReferenceTags)
+          const resolvedActors = shouldResolveFromReferences
+            ? await this.resolveActorsFromReferences(sourceEvents, requestedType, relays)
+            : this.extractActorsFromEvents(sourceEvents, requestedType)
+          resolvedActors.forEach((resolvedActor) => this.addRankedActor(rankedActorMap, resolvedActor))
+          continue
+        }
+
+        if (isPubkeyType(requestedType)) {
+          if(povItem.startsWith('npub')) {
+            const decoded = decode(povItem)
+            if(decoded.type === 'npub') {
+              this.addRankedActor(rankedActorMap, decoded.data as string)
+            }
+          } else {
+            this.addRankedActor(rankedActorMap, povItem)
+          }
+        } else {
+          this.addRankedActor(rankedActorMap, povItem)
+        }
+      } catch(e) {
+        console.log(`GrapeRank : ${this.interpreterId} : resolvePovContext : failed to parse POV item '${povItem}':`, e)
+      }
+    }
+
+    const rankedPov: RankedPov = [...rankedActorMap.entries()]
+    const effectiveActorMode: 'pubkey' | 'event' = actorMode === 'event' && rankedPov.length > 0
+      ? 'event'
+      : 'pubkey'
+
+    const context: PovActorContext = {
+      actorMode: effectiveActorMode,
+      rankedPov,
+      eventActorReferenceMap: effectiveActorMode === 'event' && eventActorReferenceMap.size ? eventActorReferenceMap : undefined,
+    }
+
+    this.povActorContext = context
+    return context
+  }
+
 
   // resolveActors() returns a set of actor ids supported by this interpreter
   // from a given `type` and `pov` OR from the latest iteration of fetched data.
@@ -119,173 +443,13 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   // Actor IDs should always be strings in a format compatible with the requested `actorType`
   async resolveActors(type?: povType, pov?: string | string[]):Promise<Set<actorId>>{
     const actors: Set<actorId> = new Set()
-
-    const fetchEventsWithRetry = async (filter: NostrFilter, relays: string[]): Promise<Set<NostrEvent>> => {
-      if (!relays.length) {
-        return new Set()
-      }
-
-      for (let attempt = 1; attempt <= fetchRetryAttempts; attempt++) {
-        try {
-          const fetchedEvents = await fetchEvents(filter, relays)
-          if (fetchedEvents.size > 0) return fetchedEvents
-        } catch {
-          // MVP behavior: relay fetch failures are retried and then skipped silently.
-        }
-
-        if (attempt < fetchRetryAttempts) {
-          await sleep(fetchRetryBackoffMs * attempt)
-        }
-      }
-
-      return new Set()
-    }
-
-    const resolvePaginatedAddressableEvents = async (
-      rootEvents: Set<NostrEvent>,
-      kind: number,
-      pubkey: string,
-      relays: string[],
-    ): Promise<Set<NostrEvent>> => {
-      const allEvents = new Map<string, NostrEvent>()
-      const discoveredDTags = new Set<string>()
-      const pendingDTags = new Set<string>()
-
-      for (const rootEvent of rootEvents) {
-        allEvents.set(rootEvent.id, rootEvent)
-        const dTagValue = extractDTagValue(rootEvent)
-        if (dTagValue) discoveredDTags.add(dTagValue)
-      }
-
-      for (const event of allEvents.values()) {
-        const paginationDTags = extractPaginationDTags(event)
-        for (const dTagValue of paginationDTags) {
-          if (!discoveredDTags.has(dTagValue)) pendingDTags.add(dTagValue)
-        }
-      }
-
-      while (pendingDTags.size > 0) {
-        const nextBatch = [...pendingDTags]
-        pendingDTags.clear()
-        nextBatch.forEach(dTag => discoveredDTags.add(dTag))
-
-        const filter: NostrFilter = {
-          kinds: [kind],
-          authors: [pubkey],
-          '#d': nextBatch,
-        }
-
-        const pageEvents = await fetchEventsWithRetry(filter, relays)
-        for (const pageEvent of pageEvents) {
-          allEvents.set(pageEvent.id, pageEvent)
-
-          const dTagValue = extractDTagValue(pageEvent)
-          if (dTagValue) discoveredDTags.add(dTagValue)
-
-          const nestedDTags = extractPaginationDTags(pageEvent)
-          for (const nestedDTag of nestedDTags) {
-            if (!discoveredDTags.has(nestedDTag)) {
-              pendingDTags.add(nestedDTag)
-            }
-          }
-        }
-      }
-
-      return new Set(allEvents.values())
-    }
-
-    const extractActorsFromEvents = (events: Set<NostrEvent>, requestedType: NostrType): Set<actorId> => {
-      const extracted = new Set<actorId>()
-
-      for (const event of events) {
-        if (requestedType === 'pubkey') {
-          if (validateNostrTypeValue('pubkey', event.pubkey)) {
-            extracted.add(event.pubkey)
-          }
-          continue
-        }
-
-        if (requestedType === 'id') {
-          extracted.add(event.id)
-          continue
-        }
-
-        if (requestedType === 'kind') {
-          extracted.add(String(event.kind))
-          continue
-        }
-
-        for (const tag of event.tags) {
-          if (tag[0] === requestedType && tag[1] && validateNostrTypeValue(requestedType, tag[1])) {
-            extracted.add(tag[1])
-          }
-        }
-      }
-
-      return extracted
-    }
-
-    const collectReferenceTargets = (events: Set<NostrEvent>): EventReferenceTarget[] => {
-      const targets: EventReferenceTarget[] = []
-
-      for (const event of events) {
-        for (const tag of event.tags) {
-          const tagName = tag[0] as NostrType
-          if ((!EventTypes.includes(tagName) || tagName === 'id') || !tag[1]) continue
-
-          const decodedReference = decodeEventReference(tag[1])
-          if (!decodedReference) continue
-
-          const relayHintsFromTag = tag.slice(2).filter(value => typeof value === 'string' && isRelayUrl(value))
-          targets.push({
-            ...decodedReference,
-            relayHints: mergeRelayLists(decodedReference.relayHints, relayHintsFromTag),
-          })
-        }
-      }
-
-      return targets
-    }
-
-    const resolveActorsFromReferences = async (
-      sourceEvents: Set<NostrEvent>,
-      requestedType: NostrType,
-      fallbackRelays: string[],
-    ): Promise<Set<actorId>> => {
-      const referencedEvents = new Map<string, NostrEvent>()
-      const referenceTargets = collectReferenceTargets(sourceEvents)
-
-      for (const target of referenceTargets) {
-        const targetRelays = mergeRelayLists(target.relayHints, fallbackRelays)
-        if (!targetRelays.length) continue
-
-        let filter: NostrFilter | undefined
-        if (target.referenceType === 'id') {
-          filter = { ids: [target.value] }
-        } else {
-          const coordinate = parseCoordinate(target.value)
-          if (!coordinate) continue
-          filter = {
-            kinds: [coordinate.kind],
-            authors: [coordinate.pubkey],
-            '#d': [coordinate.identifier],
-          }
-        }
-
-        const fetched = await fetchEventsWithRetry(filter, targetRelays)
-        for (const event of fetched) {
-          referencedEvents.set(event.id, event)
-        }
-      }
-
-      return extractActorsFromEvents(new Set(referencedEvents.values()), requestedType)
-    }
     
     if(type && pov) {
       if(!this.allowedActorTypes.includes(type as NostrType) && !this.allowedSubjectTypes.includes(type as NostrType)) {
         throw new Error(`GrapeRank : ${this.interpreterId} : resolveActors : type '${type}' not allowed`)
       }
       
+      const requestedType = type as NostrType
       const povArray = Array.isArray(pov) ? pov : [pov]
       
       for(const povItem of povArray) {
@@ -305,22 +469,21 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
                 '#d': identifier ? [identifier] : undefined
               }
 
-              const rootEvents = await fetchEventsWithRetry(filter, relays)
-              const sourceEvents = await resolvePaginatedAddressableEvents(rootEvents, kind, pubkey, relays)
-              const requestedType = type as NostrType
+              const rootEvents = await this.fetchEventsWithRetry(filter, relays)
+              const sourceEvents = await this.resolvePaginatedAddressableEvents(rootEvents, kind, pubkey, relays)
               const typeIsEventField = NostrEventFields.includes(requestedType as NostrEventField)
               const sourceHasReferenceTags = hasEventReferenceTags(sourceEvents)
-              const shouldResolveFromReferences = typeIsEventField || (!EventTypes.includes(requestedType) && sourceHasReferenceTags)
+              const shouldResolveFromReferences = typeIsEventField || (!isEventType(requestedType) && sourceHasReferenceTags)
 
               if (shouldResolveFromReferences) {
-                const referencedActors = await resolveActorsFromReferences(sourceEvents, requestedType, relays)
+                const referencedActors = await this.resolveActorsFromReferences(sourceEvents, requestedType, relays)
                 referencedActors.forEach(actor => actors.add(actor))
               } else {
-                const directActors = extractActorsFromEvents(sourceEvents, requestedType)
+                const directActors = this.extractActorsFromEvents(sourceEvents, requestedType)
                 directActors.forEach(actor => actors.add(actor))
               }
             }
-          } else if(type === 'pubkey' || type === 'p' || type === 'P') {
+          } else if (isPubkeyType(requestedType)) {
             if(povItem.startsWith('npub')) {
               const decoded = decode(povItem)
               if(decoded.type === 'npub') {
@@ -337,6 +500,10 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
         }
       }
     } else {
+      if (this.povActorContext?.actorMode === 'event') {
+        return deriveActorIdsFromRankedPov(this.povActorContext.rankedPov)
+      }
+
       if(this.customResolveActors) {
         return await this.customResolveActors(this)
       }
@@ -366,6 +533,59 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     return actors
   }
 
+  private buildEventActorReferenceFetchFilters(eventActorReference: EventActorReference): NostrFilter[] {
+    const baseFilter: NostrFilter = {
+      ...this.request?.filter,
+      kinds: this.fetchKinds,
+    }
+
+    if (eventActorReference.referenceType === eventIdReferenceType) {
+      return [
+        { ...baseFilter, '#e': [eventActorReference.value] },
+        { ...baseFilter, '#q': [eventActorReference.value] },
+      ]
+    }
+
+    return [{ ...baseFilter, '#a': [eventActorReference.value] }]
+  }
+
+  private async fetchDataByEventActors(actors: Set<actorId>): Promise<number> {
+    const fetchedSet: Set<NostrEvent> = new Set()
+    const eventActorBindings: EventActorBindings = new Map()
+
+    for (const eventActorId of actors) {
+      const eventActorReference = this.povActorContext?.eventActorReferenceMap?.get(eventActorId) || parseEventActorId(eventActorId)
+      if (!eventActorReference) continue
+
+      const relays = mergeRelayLists(eventActorReference.relayHints, NostrInterpreterClass.relays)
+      if (!relays.length) continue
+
+      const eventActorReferenceFilters = this.buildEventActorReferenceFetchFilters(eventActorReference)
+      for (const filter of eventActorReferenceFilters) {
+        await new Promise<void>((resolve)=>{
+          setTimeout(()=> resolve(), delaybetweenfetches)
+        })
+
+        const fetchedEvents = await this.fetchEventsWithRetry(filter, relays)
+        for (const event of fetchedEvents) {
+          fetchedSet.add(event)
+
+          let bindings = eventActorBindings.get(event.id)
+          if (!bindings) {
+            bindings = new Set<actorId>()
+            eventActorBindings.set(event.id, bindings)
+          }
+
+          bindings.add(eventActorId)
+        }
+      }
+    }
+
+    const dos = this.fetched.push(fetchedSet)
+    this.eventActorBindingsByDos[dos - 1] = eventActorBindings
+    return dos
+  }
+
   // breaks up a large actors list into multiple actors lists 
   // suitable for relay requests, and sends them all in parallel
   // returns a single promise that is resolved when all fetches are complete.
@@ -373,6 +593,10 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     // get actors from request if not provided
     if(!this.request) throw('no request set for this interpreter')
     actors = actors || new Set(this.request?.actors)
+
+    if (this.povActorContext?.actorMode === 'event') {
+      return this.fetchDataByEventActors(actors)
+    }
     
 
     // actorslists is actors broken into an array of list, 

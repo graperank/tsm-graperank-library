@@ -2,6 +2,7 @@ import { NostrEvent } from '../lib/nostr-tools'
 import { InterpretationController, InterpretersMap } from '../graperank/interpretation'
 import { CalculationController } from '../graperank/calculation'
 import { InterpreterFactory } from '../nostr-interpreters/factory'
+import { PubkeyTypes } from '../nostr-interpreters/types'
 import { UnsignedEvent, MetricsCollector, RequestMetrics } from './types'
 import { ParsedServiceRequest } from './requests'
 import { InterpreterStatus, CalculatorIterationStatus } from '../graperank/types'
@@ -260,11 +261,14 @@ export function generateRankingOutputEvent(
   rankings: [string, { rank?: number; confidence?: number }][],
   pagination?: {
     totalResults: number
-    pageSize: number
+    pageSize?: number
     pageNumber?: number
   }
 ): UnsignedEvent {
-  const resultTagName = requestEvent.tags.find(t => t[0] === 'config' && t[1] === 'type')?.[2] as string
+  const requestedType = requestEvent.tags.find(t => t[0] === 'config' && t[1] === 'type')?.[2]
+  const resultTagName = requestedType && PubkeyTypes.includes(requestedType as typeof PubkeyTypes[number])
+    ? 'p'
+    : (requestedType || 'p')
   const requestDTag = requestEvent.tags.find(t => t[0] === 'd')?.[1]
   
   const tags: string[][] = [
@@ -343,9 +347,9 @@ function applyPagination<T>(
   return items.slice(startIndex, endIndex)
 }
 
-function generatePageIds(baseId: string, pagination?: { totalResults: number; pageSize: number }): string[] {
+function generatePageIds(baseId: string, pagination?: { totalResults: number; pageSize?: number }): string[] {
   // If no pagination, return just the base ID
-  if (!pagination) return [baseId]  
+  if (!pagination || pagination.pageSize === undefined || pagination.pageSize <= 0) return [baseId]  
   // Generate page IDs for all pages
   const totalPages = Math.ceil(pagination.totalResults / pagination.pageSize)
   const pageIds = Array.from({ length: totalPages }, (_, i) => `${baseId}:${i + 1}`)

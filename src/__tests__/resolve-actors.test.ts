@@ -236,4 +236,95 @@ describe('NostrInterpreterClass.resolveActors', () => {
     expect(referenceFetchAttempts).toBe(3)
     expect(actors.has(referencedEventAuthor)).toBe(true)
   })
+
+  test('resolvePovContext builds event-actor rankedPov with parsed ranks for kind 37573 source tags', async () => {
+    jest.spyOn(nostrTools, 'decode').mockImplementation((value: string) => {
+      if (value === 'naddr1root') {
+        return {
+          type: 'naddr',
+          data: {
+            kind: 37573,
+            pubkey: authorPubkey,
+            identifier: 'root',
+            relays: [],
+          },
+        } as any
+      }
+
+      if (value === 'nevent1encoded') {
+        return {
+          type: 'nevent',
+          data: {
+            id: eventId2,
+            relays: [],
+          },
+        } as any
+      }
+
+      throw new Error(`Unexpected decode value ${value}`)
+    })
+
+    const rootEvent = buildEvent(rootEventId, authorPubkey, 37573, [
+      ['d', 'root'],
+      ['e', eventId1, '0.91'],
+      ['q', 'nostr:nevent1encoded'],
+    ])
+
+    fetchEventsMock.mockImplementation(async (filter) => {
+      if (filter['#d']?.includes('root')) return new Set([rootEvent])
+      return new Set()
+    })
+
+    const interpreter = buildInterpreter()
+    const context = await interpreter.resolvePovContext('pubkey', 'naddr1root')
+
+    expect(context).toBeDefined()
+    expect(context!.actorMode).toBe('event')
+
+    const rankedMap = new Map<string, number | undefined>()
+    context!.rankedPov.forEach(([actor, rank]) => rankedMap.set(actor, rank))
+    expect(rankedMap.get(`event:e:${eventId1}`)).toBe(0.91)
+    expect(rankedMap.has(`event:e:${eventId2}`)).toBe(true)
+    expect(context!.eventActorReferenceMap?.get(`event:e:${eventId1}`)?.value).toBe(eventId1)
+    expect(context!.eventActorReferenceMap?.get(`event:e:${eventId2}`)?.value).toBe(eventId2)
+  })
+
+  test('resolvePovContext keeps rank undefined when source rank tag is malformed', async () => {
+    jest.spyOn(nostrTools, 'decode').mockImplementation((value: string) => {
+      if (value === 'naddr1root') {
+        return {
+          type: 'naddr',
+          data: {
+            kind: 37573,
+            pubkey: authorPubkey,
+            identifier: 'root',
+            relays: [],
+          },
+        } as any
+      }
+
+      throw new Error(`Unexpected decode value ${value}`)
+    })
+
+    const rootEvent = buildEvent(rootEventId, authorPubkey, 37573, [
+      ['d', 'root'],
+      ['e', eventId1, 'not-a-number'],
+    ])
+
+    fetchEventsMock.mockImplementation(async (filter) => {
+      if (filter['#d']?.includes('root')) return new Set([rootEvent])
+      return new Set()
+    })
+
+    const interpreter = buildInterpreter()
+    const context = await interpreter.resolvePovContext('pubkey', 'naddr1root')
+
+    expect(context).toBeDefined()
+    expect(context!.actorMode).toBe('event')
+
+    const rankedMap = new Map<string, number | undefined>()
+    context!.rankedPov.forEach(([actor, rank]) => rankedMap.set(actor, rank))
+    expect(rankedMap.has(`event:e:${eventId1}`)).toBe(true)
+    expect(rankedMap.get(`event:e:${eventId1}`)).toBeUndefined()
+  })
 })

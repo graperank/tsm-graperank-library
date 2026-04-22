@@ -1,13 +1,112 @@
 import { NostrEvent, NostrFilter, SimplePool, npubEncode, decode } from '../lib/nostr-tools'
-import { EventReferenceTarget, EventTypes, NostrEventField, NostrEventFields, NostrTagType, NostrType, PubkeyTypes } from './types'
-import { RankedPov, UnrankedPov } from '../graperank/types'
+import { EventReferenceTarget, EventReferenceType, EventReferenceTypes, EventTagTypes, EventTypes, NostrTagType, NostrType, PubkeyTypes } from './types'
+import { RankedPov, UnrankedPov, actorId } from '../graperank/types'
+import { EventActorReference } from '../graperank/nostr-types'
 
 
 export const maxfetch = 500
-const eventReferenceTagTypes = EventTypes.filter(type => !NostrEventFields.includes(type as NostrEventField))
+const eventReferenceTagTypes: ReadonlyArray<NostrType> = [...EventTagTypes]
+const eventReferenceTagTypeSet = new Set<string>(eventReferenceTagTypes)
+const eventTypeSet = new Set<NostrType>(EventTypes as ReadonlyArray<NostrType>)
+const pubkeyTypeSet = new Set<NostrType>(PubkeyTypes as ReadonlyArray<NostrType>)
+
+const eventIdReferenceType: EventReferenceType = EventReferenceTypes[0]
+const eventAddressReferenceType: EventReferenceType = EventReferenceTypes[1]
+
+function isEventReferenceType(value: string): value is EventReferenceType {
+  return (EventReferenceTypes as ReadonlyArray<string>).includes(value)
+}
+
+export function isEventType(value: NostrType): boolean {
+  return eventTypeSet.has(value)
+}
+
+export function isPubkeyType(value: NostrType): boolean {
+  return pubkeyTypeSet.has(value)
+}
 
 export function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+export function normalizeEventActorReference(reference: EventReferenceTarget | EventActorReference): EventActorReference | undefined {
+  if (reference.referenceType === eventIdReferenceType) {
+    const normalizedId = reference.value?.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(normalizedId)) return undefined
+    return {
+      referenceType: eventIdReferenceType,
+      value: normalizedId,
+      relayHints: mergeRelayLists(reference.relayHints),
+    }
+  }
+
+  const coordinate = parseCoordinate(reference.value)
+  if (!coordinate) return undefined
+
+  return {
+    referenceType: eventAddressReferenceType,
+    value: `${coordinate.kind}:${coordinate.pubkey.toLowerCase()}:${coordinate.identifier}`,
+    relayHints: mergeRelayLists(reference.relayHints),
+  }
+}
+
+export function buildEventActorId(reference: EventReferenceTarget | EventActorReference): actorId | undefined {
+  const normalizedEventActorReference = normalizeEventActorReference(reference)
+  if (!normalizedEventActorReference) return undefined
+  return `event:${normalizedEventActorReference.referenceType}:${normalizedEventActorReference.value}`
+}
+
+export function parseEventActorId(value: actorId): EventActorReference | undefined {
+  const split = value.split(':')
+  if (split.length < 3 || split[0] !== 'event') return undefined
+
+  const referenceType = split[1]
+  if (!isEventReferenceType(referenceType)) return undefined
+
+  if (referenceType === eventIdReferenceType) {
+    const eventId = split[2]
+    return normalizeEventActorReference({
+      referenceType: eventIdReferenceType,
+      value: eventId,
+      relayHints: [],
+    })
+  }
+
+  if (referenceType === eventAddressReferenceType) {
+    const coordinateValue = split.slice(2).join(':')
+    return normalizeEventActorReference({
+      referenceType: eventAddressReferenceType,
+      value: coordinateValue,
+      relayHints: [],
+    })
+  }
+
+  return undefined
+}
+
+export function extractReferenceTags(sourceEvents: Set<NostrEvent>): Array<{ sourceEvent: NostrEvent; tag: string[] }> {
+  const referenceTags: Array<{ sourceEvent: NostrEvent; tag: string[] }> = []
+
+  for (const sourceEvent of sourceEvents) {
+    for (const tag of sourceEvent.tags) {
+      if (!tag[1]) continue
+      if (!EventTagTypes.includes(tag[0] as typeof EventTagTypes[number])) continue
+      referenceTags.push({ sourceEvent, tag })
+    }
+  }
+
+  return referenceTags
+}
+
+export function parseReferenceRank(sourceEvent: NostrEvent, tag: string[]): number | undefined {
+  if (sourceEvent.kind !== 37573) return undefined
+  const parsedRank = Number(tag[2])
+  if (!Number.isFinite(parsedRank)) return undefined
+  return parsedRank
+}
+
+export function deriveActorIdsFromRankedPov(rankedPov: RankedPov): Set<actorId> {
+  return new Set(rankedPov.map(([rankedActorId]) => rankedActorId))
 }
 
 export function isRelayUrl(value: string): boolean {
@@ -46,13 +145,13 @@ export function decodeEventReference(referenceValue: string): EventReferenceTarg
   const relayHints: string[] = []
 
   if (/^[0-9a-fA-F]{64}$/.test(normalizedReference)) {
-    return { referenceType: 'id', value: normalizedReference.toLowerCase(), relayHints }
+    return { referenceType: eventIdReferenceType, value: normalizedReference.toLowerCase(), relayHints }
   }
 
   const coordinate = parseCoordinate(normalizedReference)
   if (coordinate) {
     return {
-      referenceType: 'a',
+      referenceType: eventAddressReferenceType,
       value: `${coordinate.kind}:${coordinate.pubkey.toLowerCase()}:${coordinate.identifier}`,
       relayHints,
     }
@@ -62,7 +161,7 @@ export function decodeEventReference(referenceValue: string): EventReferenceTarg
     const decodedReference = decode(normalizedReference)
     if (decodedReference.type === 'note') {
       return {
-        referenceType: 'id',
+        referenceType: eventIdReferenceType,
         value: String(decodedReference.data).toLowerCase(),
         relayHints,
       }
@@ -72,7 +171,7 @@ export function decodeEventReference(referenceValue: string): EventReferenceTarg
       const eventData = decodedReference.data as { id?: string; relays?: string[] }
       if (!eventData.id) return undefined
       return {
-        referenceType: 'id',
+        referenceType: eventIdReferenceType,
         value: eventData.id.toLowerCase(),
         relayHints: mergeRelayLists(eventData.relays),
       }
@@ -87,7 +186,7 @@ export function decodeEventReference(referenceValue: string): EventReferenceTarg
       }
       if (!naddrData.kind || !naddrData.pubkey || !naddrData.identifier) return undefined
       return {
-        referenceType: 'a',
+        referenceType: eventAddressReferenceType,
         value: `${naddrData.kind}:${naddrData.pubkey.toLowerCase()}:${naddrData.identifier}`,
         relayHints: mergeRelayLists(naddrData.relays),
       }
@@ -129,7 +228,7 @@ export function extractPaginationDTags(event: NostrEvent): string[] {
 export function hasEventReferenceTags(events: Set<NostrEvent>): boolean {
   for (const event of events) {
     for (const tag of event.tags) {
-      if (eventReferenceTagTypes.includes(tag[0] as NostrType) && !!tag[1]) {
+      if (eventReferenceTagTypeSet.has(tag[0]) && !!tag[1]) {
         return true
       }
     }
@@ -359,7 +458,7 @@ export function sliceBigArray<T>(array: T[], chunkSize: number): T[][] {
 
 // Actors are always EITHER event types or pubkey types
 export function getEventActor(actorType : NostrType, event : NostrEvent) : string | undefined {
-  if(!actorType || (!PubkeyTypes.includes(actorType) && !EventTypes.includes(actorType))) return
+  if(!actorType || (!isPubkeyType(actorType) && !isEventType(actorType))) return
   return getEventSubject(actorType, event)
 }
 
@@ -380,7 +479,7 @@ export function getEventSubject(subjectType : NostrType, event : NostrEvent, tag
 
 export function validateNostrTypeValue(type: NostrType, value?: string): boolean {
   if(!value) return false
-  if (PubkeyTypes.includes(type)) {
+  if (isPubkeyType(type)) {
     return validatePubkey(value)
   }
   return true
