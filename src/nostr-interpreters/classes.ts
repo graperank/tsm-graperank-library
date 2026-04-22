@@ -1,25 +1,15 @@
 import { NostrEvent, NostrFilter, npubEncode, decode, SimplePool, useWebSocketImplementation } from '../lib/nostr-tools'
 import { subjectId, Interpreter, InterpreterRequest, InteractionsMap, actorId, InterpreterInitializer, InterpreterParams, InterpreterId, InteractionData, povType } from "../graperank/types"
-import { NostrInterpreterClassConfig, NostrInterpreterId, NostrInterpreterKeys, NostrInterpreterParams, NostrType } from "./types"
+import { EventReferenceTarget, EventTypes, NostrEventField, NostrEventFields, NostrInterpreterClassConfig, NostrInterpreterId, NostrInterpreterKeys, NostrInterpreterParams, NostrType } from "./types"
 import { applyInteractionsByTag } from "./callbacks"
-import { fetchEvents, sliceBigArray, maxfetch } from "./helpers"
+import { decodeEventReference, extractDTagValue, extractPaginationDTags, fetchEvents, hasEventReferenceTags, isRelayUrl, maxfetch, mergeRelayLists, parseCoordinate, sliceBigArray, sleep, validateNostrTypeValue } from "./helpers"
 import WebSocket from 'ws'
 import { InterpreterFactory } from '../graperank/interpretation'
 useWebSocketImplementation(WebSocket)
 
 const delaybetweenfetches = 500 // milliceconds
-
-
-function parseNostrInterpreterID(id: NostrInterpreterId): NostrInterpreterKeys {
-  const split = id.split('-')
-  const kind = Number(split[1])
-  const type = split[2] as NostrType
-  return { kind, type }
-}
-function constructNostrInterpreterID(key: NostrInterpreterKeys): NostrInterpreterId {
-  return `nostr-${key.kind}${key.type ? `-${key.type}` : ''}` as NostrInterpreterId
-}
-
+const fetchRetryAttempts = 3
+const fetchRetryBackoffMs = 250
 export class NostrInterpreterFactory extends InterpreterFactory<"nostr"> {
   readonly namespace = "nostr"
   parseID = parseNostrInterpreterID
@@ -34,10 +24,7 @@ export class NostrInterpreterFactory extends InterpreterFactory<"nostr"> {
  */
 export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> implements Interpreter<ParamsType> {
 
-  private static _relays: string[] = [
-    "wss://relay.primal.net",
-    "wss://relay.damus.io"
-  ]
+  private static _relays: string[] = []
   static get relays() {
     return this._relays
   }
@@ -132,6 +119,167 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   // Actor IDs should always be strings in a format compatible with the requested `actorType`
   async resolveActors(type?: povType, pov?: string | string[]):Promise<Set<actorId>>{
     const actors: Set<actorId> = new Set()
+
+    const fetchEventsWithRetry = async (filter: NostrFilter, relays: string[]): Promise<Set<NostrEvent>> => {
+      if (!relays.length) {
+        return new Set()
+      }
+
+      for (let attempt = 1; attempt <= fetchRetryAttempts; attempt++) {
+        try {
+          const fetchedEvents = await fetchEvents(filter, relays)
+          if (fetchedEvents.size > 0) return fetchedEvents
+        } catch {
+          // MVP behavior: relay fetch failures are retried and then skipped silently.
+        }
+
+        if (attempt < fetchRetryAttempts) {
+          await sleep(fetchRetryBackoffMs * attempt)
+        }
+      }
+
+      return new Set()
+    }
+
+    const resolvePaginatedAddressableEvents = async (
+      rootEvents: Set<NostrEvent>,
+      kind: number,
+      pubkey: string,
+      relays: string[],
+    ): Promise<Set<NostrEvent>> => {
+      const allEvents = new Map<string, NostrEvent>()
+      const discoveredDTags = new Set<string>()
+      const pendingDTags = new Set<string>()
+
+      for (const rootEvent of rootEvents) {
+        allEvents.set(rootEvent.id, rootEvent)
+        const dTagValue = extractDTagValue(rootEvent)
+        if (dTagValue) discoveredDTags.add(dTagValue)
+      }
+
+      for (const event of allEvents.values()) {
+        const paginationDTags = extractPaginationDTags(event)
+        for (const dTagValue of paginationDTags) {
+          if (!discoveredDTags.has(dTagValue)) pendingDTags.add(dTagValue)
+        }
+      }
+
+      while (pendingDTags.size > 0) {
+        const nextBatch = [...pendingDTags]
+        pendingDTags.clear()
+        nextBatch.forEach(dTag => discoveredDTags.add(dTag))
+
+        const filter: NostrFilter = {
+          kinds: [kind],
+          authors: [pubkey],
+          '#d': nextBatch,
+        }
+
+        const pageEvents = await fetchEventsWithRetry(filter, relays)
+        for (const pageEvent of pageEvents) {
+          allEvents.set(pageEvent.id, pageEvent)
+
+          const dTagValue = extractDTagValue(pageEvent)
+          if (dTagValue) discoveredDTags.add(dTagValue)
+
+          const nestedDTags = extractPaginationDTags(pageEvent)
+          for (const nestedDTag of nestedDTags) {
+            if (!discoveredDTags.has(nestedDTag)) {
+              pendingDTags.add(nestedDTag)
+            }
+          }
+        }
+      }
+
+      return new Set(allEvents.values())
+    }
+
+    const extractActorsFromEvents = (events: Set<NostrEvent>, requestedType: NostrType): Set<actorId> => {
+      const extracted = new Set<actorId>()
+
+      for (const event of events) {
+        if (requestedType === 'pubkey') {
+          if (validateNostrTypeValue('pubkey', event.pubkey)) {
+            extracted.add(event.pubkey)
+          }
+          continue
+        }
+
+        if (requestedType === 'id') {
+          extracted.add(event.id)
+          continue
+        }
+
+        if (requestedType === 'kind') {
+          extracted.add(String(event.kind))
+          continue
+        }
+
+        for (const tag of event.tags) {
+          if (tag[0] === requestedType && tag[1] && validateNostrTypeValue(requestedType, tag[1])) {
+            extracted.add(tag[1])
+          }
+        }
+      }
+
+      return extracted
+    }
+
+    const collectReferenceTargets = (events: Set<NostrEvent>): EventReferenceTarget[] => {
+      const targets: EventReferenceTarget[] = []
+
+      for (const event of events) {
+        for (const tag of event.tags) {
+          const tagName = tag[0] as NostrType
+          if ((!EventTypes.includes(tagName) || tagName === 'id') || !tag[1]) continue
+
+          const decodedReference = decodeEventReference(tag[1])
+          if (!decodedReference) continue
+
+          const relayHintsFromTag = tag.slice(2).filter(value => typeof value === 'string' && isRelayUrl(value))
+          targets.push({
+            ...decodedReference,
+            relayHints: mergeRelayLists(decodedReference.relayHints, relayHintsFromTag),
+          })
+        }
+      }
+
+      return targets
+    }
+
+    const resolveActorsFromReferences = async (
+      sourceEvents: Set<NostrEvent>,
+      requestedType: NostrType,
+      fallbackRelays: string[],
+    ): Promise<Set<actorId>> => {
+      const referencedEvents = new Map<string, NostrEvent>()
+      const referenceTargets = collectReferenceTargets(sourceEvents)
+
+      for (const target of referenceTargets) {
+        const targetRelays = mergeRelayLists(target.relayHints, fallbackRelays)
+        if (!targetRelays.length) continue
+
+        let filter: NostrFilter | undefined
+        if (target.referenceType === 'id') {
+          filter = { ids: [target.value] }
+        } else {
+          const coordinate = parseCoordinate(target.value)
+          if (!coordinate) continue
+          filter = {
+            kinds: [coordinate.kind],
+            authors: [coordinate.pubkey],
+            '#d': [coordinate.identifier],
+          }
+        }
+
+        const fetched = await fetchEventsWithRetry(filter, targetRelays)
+        for (const event of fetched) {
+          referencedEvents.set(event.id, event)
+        }
+      }
+
+      return extractActorsFromEvents(new Set(referencedEvents.values()), requestedType)
+    }
     
     if(type && pov) {
       if(!this.allowedActorTypes.includes(type as NostrType) && !this.allowedSubjectTypes.includes(type as NostrType)) {
@@ -146,18 +294,30 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
             const decoded = decode(povItem)
             if(decoded.type === 'naddr') {
               const { kind, pubkey, identifier } = decoded.data
+              const naddrRelays = Array.isArray(decoded.data.relays)
+                ? decoded.data.relays.filter((relay): relay is string => typeof relay === 'string')
+                : []
+              const relays = mergeRelayLists(naddrRelays, NostrInterpreterClass.relays)
+
               const filter: NostrFilter = {
                 kinds: [kind],
                 authors: [pubkey],
                 '#d': identifier ? [identifier] : undefined
               }
-              const events = await fetchEvents(filter, NostrInterpreterClass.relays)
-              for(const event of events) {
-                for(const tag of event.tags) {
-                  if(tag[0] === type && tag[1]) {
-                    actors.add(tag[1])
-                  }
-                }
+
+              const rootEvents = await fetchEventsWithRetry(filter, relays)
+              const sourceEvents = await resolvePaginatedAddressableEvents(rootEvents, kind, pubkey, relays)
+              const requestedType = type as NostrType
+              const typeIsEventField = NostrEventFields.includes(requestedType as NostrEventField)
+              const sourceHasReferenceTags = hasEventReferenceTags(sourceEvents)
+              const shouldResolveFromReferences = typeIsEventField || (!EventTypes.includes(requestedType) && sourceHasReferenceTags)
+
+              if (shouldResolveFromReferences) {
+                const referencedActors = await resolveActorsFromReferences(sourceEvents, requestedType, relays)
+                referencedActors.forEach(actor => actors.add(actor))
+              } else {
+                const directActors = extractActorsFromEvents(sourceEvents, requestedType)
+                directActors.forEach(actor => actors.add(actor))
               }
             }
           } else if(type === 'pubkey' || type === 'p' || type === 'P') {
@@ -288,5 +448,13 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
 
 }
 
-export type pubkey = string
-export type signature = string
+function parseNostrInterpreterID(id: NostrInterpreterId): NostrInterpreterKeys {
+  const split = id.split('-')
+  const kind = Number(split[1])
+  const type = split[2] as NostrType
+  return { kind, type }
+}
+
+function constructNostrInterpreterID(key: NostrInterpreterKeys): NostrInterpreterId {
+  return `nostr-${key.kind}${key.type ? `-${key.type}` : ''}` as NostrInterpreterId
+}

@@ -2,23 +2,42 @@ import { NostrEvent } from "../lib/nostr-tools"
 import { InterpreterParams, Interpreter, InterpreterId, InteractionsMap, actorId, InterpreterInitializer } from "../graperank/types"
 import { NostrInterpreterClass } from "./classes"
 
-export type NostrEventField = 'id' | 'pubkey' | 'kind'
+export const NostrEventFields = ['id', 'pubkey', 'kind'] as const
+export type NostrEventField = typeof NostrEventFields[number]
 
-export type NostrSingleLetterTag = 
-  | 'a' | 'A' | 'c' | 'd' | 'D' | 'e' | 'E' | 'f' | 'g' | 'h' 
-  | 'i' | 'I' | 'k' | 'K' | 'l' | 'L' | 'm' | 'p' | 'P' | 'q' 
-  | 'r' | 's' | 't' | 'u' | 'x' | 'y' | 'z' | '-'
+export const NostrSingleLetterTags = [
+  'a', 'A', 'c', 'd', 'D', 'e', 'E', 'f', 'g', 'h', 
+  'i', 'I', 'k', 'K', 'l', 'L', 'm', 'p', 'P', 'q', 
+  'r', 's', 't', 'u', 'x', 'y', 'z', '-'
+] as const
+export type NostrSingleLetterTag = typeof NostrSingleLetterTags[number]
 
-export type NostrMultiLetterTag = 
-  | 'alt' | 'amount' | 'bolt11' | 'branch-name' | 'challenge' 
-  | 'client' | 'clone' | 'content-warning' | 'delegation' 
-  | 'dep' | 'description' | 'emoji' | 'encrypted' | 'extension' 
-  | 'expiration'
+export const NostrMultiLetterTags = [
+  'alt', 'amount', 'bolt11', 'branch-name', 'challenge', 
+  'client', 'clone', 'content-warning', 'delegation', 
+  'dep', 'description', 'emoji', 'encrypted', 'extension', 
+  'expiration'
+] as const
+export type NostrMultiLetterTag = typeof NostrMultiLetterTags[number]
+
+export const PubkeyTypes : NostrType[] = ["pubkey", "p", "P"]
+export type PubkeyType = typeof PubkeyTypes[number]
+
+export const EventTypes : NostrType[] = ["id", "e", "a", "q"]
+export type EventType = typeof EventTypes[number]
+
+export type EventReferenceTarget = {
+  referenceType: 'id' | 'a'
+  value: string
+  relayHints: string[]
+}
+
+export type pubkey = string
+export type signature = string
 
 export type NostrTagType = NostrSingleLetterTag | NostrMultiLetterTag
 // standard relay indexable event tags or fields
 export type NostrType = NostrEventField | NostrSingleLetterTag 
-
 
 // Nostr interpreter ID : `nostr-<kind>` or `nostr-<kind>-<tag>`
 // Each Nostr interpreter should be identifiable 

@@ -241,5 +241,39 @@ describe('TSM Request Parser', () => {
       expect(result.configs.minrank).toBe(5)
       expect(result.configs.precision).toBe(0.001)
     })
+
+    test('should validate type against allowed types option', () => {
+      const event: NostrEvent = {
+        ...baseRequestEvent,
+        tags: [
+          ['config', 'type', 'e'],
+          ['config', 'pov', '"npub1test"'],
+          ['config', 'interpreters', '[{"id":"nostr-3"}]']
+        ]
+      }
+
+      expect(() => parseServiceRequest(event, undefined, {
+        allowedTypes: ['pubkey', 'p', 'P']
+      })).toThrow(ServiceRequestParseError)
+      expect(() => parseServiceRequest(event, undefined, {
+        allowedTypes: ['pubkey', 'p', 'P']
+      })).toThrow("Invalid type 'e'")
+    })
+
+    test('should allow inferred type when included in allowed types option', () => {
+      const event: NostrEvent = {
+        ...baseRequestEvent,
+        tags: [
+          ['config', 'pov', '"npub1test"'],
+          ['config', 'interpreters', '[{"id":"nostr-3","params":{"subjectType":"p"}}]']
+        ]
+      }
+
+      const result = parseServiceRequest(event, undefined, {
+        allowedTypes: ['pubkey', 'p', 'P']
+      })
+
+      expect(result.configs.type).toBe('p')
+    })
   })
 })

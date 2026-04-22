@@ -69,13 +69,15 @@ export function generateServiceAnnouncement(
   const derivedAllowedTypes = getAllowedSubjectTypes()
   const typeConfig = config.type || { 
     default: derivedAllowedTypes.includes('p') ? 'p' : derivedAllowedTypes[0], 
-    allowed: derivedAllowedTypes 
+    allowed: derivedAllowedTypes,
+    valueType: 'tagname',
+    description: 'Expected format for POV.',
   }
   tags.push([
     'config',
     'type',
-    'tagname',
-    'Expected format for POV.',
+    typeConfig.valueType || 'tagname',
+    typeConfig.description || 'Expected format for POV.',
     typeConfig.default,
     typeConfig.allowed ? JSON.stringify(typeConfig.allowed) : '[]'
   ])

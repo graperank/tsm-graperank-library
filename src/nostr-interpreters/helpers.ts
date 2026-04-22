@@ -1,12 +1,141 @@
-import { NostrEvent, NostrFilter, SimplePool, npubEncode } from '../lib/nostr-tools'
-import { NostrTagType, NostrType } from './types'
+import { NostrEvent, NostrFilter, SimplePool, npubEncode, decode } from '../lib/nostr-tools'
+import { EventReferenceTarget, EventTypes, NostrEventField, NostrEventFields, NostrTagType, NostrType, PubkeyTypes } from './types'
 import { RankedPov, UnrankedPov } from '../graperank/types'
 
 
-export const PubkeyTypes : NostrType[] = ["pubkey", "p", "P"]
-export const EventTypes : NostrType[] = ["id", "e", "a"]
-
 export const maxfetch = 500
+const eventReferenceTagTypes = EventTypes.filter(type => !NostrEventFields.includes(type as NostrEventField))
+
+export function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+export function isRelayUrl(value: string): boolean {
+  return value.startsWith('ws://') || value.startsWith('wss://')
+}
+
+export function mergeRelayLists(...relayLists: Array<string[] | undefined>): string[] {
+  const merged = new Set<string>()
+  for (const relayList of relayLists) {
+    if (!relayList) continue
+    for (const relay of relayList) {
+      const trimmed = relay?.trim()
+      if (trimmed) merged.add(trimmed)
+    }
+  }
+  return [...merged]
+}
+
+export function parseCoordinate(value: string): { kind: number; pubkey: string; identifier: string } | undefined {
+  const parts = value.split(':', 3)
+  if (parts.length !== 3) return undefined
+  const kind = Number(parts[0])
+  const pubkey = parts[1]?.trim()
+  const identifier = parts[2]?.trim()
+  if (!Number.isFinite(kind) || !pubkey || !identifier) return undefined
+  return { kind, pubkey, identifier }
+}
+
+function normalizeEventReferenceValue(value: string): string {
+  if (value.startsWith('nostr:')) return value.slice(6)
+  return value
+}
+
+export function decodeEventReference(referenceValue: string): EventReferenceTarget | undefined {
+  const normalizedReference = normalizeEventReferenceValue(referenceValue.trim())
+  const relayHints: string[] = []
+
+  if (/^[0-9a-fA-F]{64}$/.test(normalizedReference)) {
+    return { referenceType: 'id', value: normalizedReference.toLowerCase(), relayHints }
+  }
+
+  const coordinate = parseCoordinate(normalizedReference)
+  if (coordinate) {
+    return {
+      referenceType: 'a',
+      value: `${coordinate.kind}:${coordinate.pubkey.toLowerCase()}:${coordinate.identifier}`,
+      relayHints,
+    }
+  }
+
+  try {
+    const decodedReference = decode(normalizedReference)
+    if (decodedReference.type === 'note') {
+      return {
+        referenceType: 'id',
+        value: String(decodedReference.data).toLowerCase(),
+        relayHints,
+      }
+    }
+
+    if (decodedReference.type === 'nevent') {
+      const eventData = decodedReference.data as { id?: string; relays?: string[] }
+      if (!eventData.id) return undefined
+      return {
+        referenceType: 'id',
+        value: eventData.id.toLowerCase(),
+        relayHints: mergeRelayLists(eventData.relays),
+      }
+    }
+
+    if (decodedReference.type === 'naddr') {
+      const naddrData = decodedReference.data as {
+        kind?: number
+        pubkey?: string
+        identifier?: string
+        relays?: string[]
+      }
+      if (!naddrData.kind || !naddrData.pubkey || !naddrData.identifier) return undefined
+      return {
+        referenceType: 'a',
+        value: `${naddrData.kind}:${naddrData.pubkey.toLowerCase()}:${naddrData.identifier}`,
+        relayHints: mergeRelayLists(naddrData.relays),
+      }
+    }
+  } catch {
+    return undefined
+  }
+
+  return undefined
+}
+
+export function extractDTagValue(event: NostrEvent): string | undefined {
+  return event.tags.find(tag => tag[0] === 'd' && tag[1])?.[1]
+}
+
+export function extractPaginationDTags(event: NostrEvent): string[] {
+  const discovered: string[] = []
+  for (const tag of event.tags) {
+    if (tag[0] !== 'v' || !tag[1]?.startsWith('page:')) continue
+    const encodedCandidates = tag[2]
+    if (!encodedCandidates) continue
+
+    try {
+      const parsed = JSON.parse(encodedCandidates)
+      if (Array.isArray(parsed)) {
+        for (const dTagValue of parsed) {
+          if (typeof dTagValue === 'string' && dTagValue.trim()) {
+            discovered.push(dTagValue.trim())
+          }
+        }
+      }
+    } catch {
+      // MVP behavior: silently skip malformed pagination tags
+    }
+  }
+  return discovered
+}
+
+export function hasEventReferenceTags(events: Set<NostrEvent>): boolean {
+  for (const event of events) {
+    for (const tag of event.tags) {
+      if (eventReferenceTagTypes.includes(tag[0] as NostrType) && !!tag[1]) {
+        return true
+      }
+    }
+  }
+  return false
+}
 
 /**
  * Adapted from NDK
@@ -17,6 +146,10 @@ export async function fetchEvents(
     filters: NostrFilter,
     relays: string[]
 ): Promise<Set<NostrEvent>> {
+    if (!relays || relays.length === 0) {
+        return new Set()
+    }
+
     // Add limit if not present (many relays require it)
     if (!filters.limit) {
         filters.limit = 1000;

@@ -15,7 +15,12 @@ export type ServiceAnnouncementConfig = {
   rigor?: { default: number, range?: [number, number] }
   precision?: { default: number, min?: number }
   interpreters?: InterpreterRequest<any>[]
-  type?: { default: string, allowed?: string[] }
+  type?: {
+    default: string
+    allowed?: string[]
+    valueType?: string
+    description?: string
+  }
   minrank?: { default: number, range?: [number, number] }
   pagination?: boolean
   customConfigs?: Array<{

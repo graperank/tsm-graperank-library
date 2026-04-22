@@ -28,6 +28,10 @@ export type ParsedServiceRequest = {
   configs: ServiceRequestConfigs
 }
 
+export type ServiceRequestParseOptions = {
+  allowedTypes?: string[]
+}
+
 export class ServiceRequestParseError extends Error {
   constructor(message: string, public field?: string) {
     super(message)
@@ -70,7 +74,8 @@ function validateRange(value: number, min: number, max: number, field: string): 
 
 export function parseServiceRequest(
   event: NostrEvent,
-  defaults?: Partial<ServiceRequestConfigs>
+  defaults?: Partial<ServiceRequestConfigs>,
+  options?: ServiceRequestParseOptions,
 ): ParsedServiceRequest {
   if (event.kind !== 37572) {
     throw new ServiceRequestParseError(
@@ -146,6 +151,15 @@ export function parseServiceRequest(
     const firstInterpreter = configs.interpreters[0]
     if (firstInterpreter.params && 'subjectType' in firstInterpreter.params) {
       configs.type = (firstInterpreter.params as any).subjectType
+    }
+  }
+
+  if (configs.type && options?.allowedTypes && options.allowedTypes.length > 0) {
+    if (!options.allowedTypes.includes(configs.type)) {
+      throw new ServiceRequestParseError(
+        `Invalid type '${configs.type}'. Allowed values: ${options.allowedTypes.join(', ')}`,
+        'type'
+      )
     }
   }
   
