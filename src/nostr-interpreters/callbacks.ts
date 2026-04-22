@@ -2,7 +2,7 @@ import { NostrEvent } from '../lib/nostr-tools'
 import { InteractionsMap, InteractionData, actorId, subjectId } from "../graperank/types"
 import { NostrInterpreterClass } from "./classes"
 import { NostrInterpreterParams, NostrType } from './types'
-import { getEventActor, getEventSubject, validatePubkey } from './helpers'
+import { getEventActor, getEventSubject, isEventType, validatePubkey } from './helpers'
 
 function getFirstTagValue(event: NostrEvent, tagName: string): string | undefined {
   const found = event.tags.find((t) => t[0] === tagName)
@@ -210,6 +210,26 @@ export async function applyZapInteractions(instance : NostrInterpreterClass<Nost
       skippedInvalid++
       continue
     }
+
+    let subject = subjectType === 'P'
+      ? sender
+      : subjectType === 'p'
+        ? recipient
+        : getEventSubject(subjectType, zapReceipt)
+    if(!subject) {
+      skippedInvalid++
+      continue
+    }
+
+    const actors = isEventType(actorType)
+      ? getActorsForEvent(instance, dos, zapReceipt, actorType)
+      : actorType === 'P'
+        ? [sender]
+        : [recipient]
+    if(!actors.length) {
+      skippedInvalid++
+      continue
+    }
     
     // Extract zap amount in millisatoshi
     let zapAmount: number | undefined
@@ -262,30 +282,21 @@ export async function applyZapInteractions(instance : NostrInterpreterClass<Nost
       }
     }
     
-    let actor: actorId
-    let subject: subjectId
-    
-    if(actorType === 'P') {
-      actor = sender
-      subject = recipient
-    } else {
-      actor = recipient
-      subject = sender
+    for(const actor of actors) {
+      let actorInteractions = newInteractionsMap.get(actor)
+      if(!actorInteractions) {
+        actorInteractions = new Map<string, InteractionData>()
+        newInteractionsMap.set(actor, actorInteractions)
+      }
+
+      if(actorInteractions.has(subject)) {
+        duplicateInteractions++
+        continue
+      }
+
+      actorInteractions.set(subject, {confidence, value, dos})
+      totalInteractions++
     }
-    
-    let actorInteractions = newInteractionsMap.get(actor)
-    if(!actorInteractions) {
-      actorInteractions = new Map<string, InteractionData>()
-      newInteractionsMap.set(actor, actorInteractions)
-    }
-    
-    if(actorInteractions.has(subject)) {
-      duplicateInteractions++
-      continue
-    }
-    
-    actorInteractions.set(subject, {confidence, value, dos})
-    totalInteractions++
   }
 
   console.log("GrapeRank : nostr interpreter : applyZapInteractions : total interpreted ", totalInteractions, " new interactions, skipped ", duplicateInteractions, " duplicates and ", skippedInvalid, " invalid zap receipts")
