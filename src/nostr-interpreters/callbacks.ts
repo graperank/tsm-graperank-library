@@ -33,6 +33,7 @@ function getActorsForEvent(
   dos: number,
   event: NostrEvent,
   actorType: NostrType,
+  options?: { requireBoundActors?: boolean },
 ): actorId[] {
   const eventActorBindings = instance.getEventActorBindings(dos)
   const boundActors = eventActorBindings?.get(event.id)
@@ -40,8 +41,84 @@ function getActorsForEvent(
     return [...boundActors]
   }
 
+  if (options?.requireBoundActors) {
+    return []
+  }
+
   const extractedActor = getEventActor(actorType, event)
   return extractedActor ? [extractedActor] : []
+}
+
+function getZapRequestPubkeyFromDescription(zapReceipt: NostrEvent): string | undefined {
+  const description = getFirstTagValue(zapReceipt, 'description')
+  if (!description) return undefined
+
+  try {
+    const parsed = JSON.parse(description) as { pubkey?: unknown }
+    const candidate = typeof parsed?.pubkey === 'string' ? parsed.pubkey : undefined
+    if (!candidate || !validatePubkey(candidate)) return undefined
+    return candidate
+  } catch {
+    return undefined
+  }
+}
+
+function resolveZapSenderPubkey(zapReceipt: NostrEvent): string | undefined {
+  const senderFromReceiptTag = getEventSubject('P', zapReceipt)
+  const senderFromRequestDescription = getZapRequestPubkeyFromDescription(zapReceipt)
+
+  if (
+    senderFromReceiptTag &&
+    senderFromRequestDescription &&
+    senderFromReceiptTag !== senderFromRequestDescription
+  ) {
+    return undefined
+  }
+
+  return senderFromReceiptTag || senderFromRequestDescription
+}
+
+function getEventActorResolvedSubjects(
+  instance: NostrInterpreterClass<NostrInterpreterParams>,
+  dos: number,
+  zapReceipt: NostrEvent,
+  subjectType: NostrType,
+): subjectId[] {
+  const povActorContext = instance.getPovActorContext()
+  const requireBoundActors = povActorContext?.actorMode === 'event'
+  const boundEventActors = getActorsForEvent(instance, dos, zapReceipt, subjectType, { requireBoundActors })
+
+  if (requireBoundActors && boundEventActors.length === 0) {
+    return []
+  }
+
+  const resolvedTypeValues = povActorContext?.eventActorResolvedTypeValues
+  if (boundEventActors.length && resolvedTypeValues?.size) {
+    const resolvedSubjects = new Set<subjectId>()
+    for (const boundEventActor of boundEventActors) {
+      const resolvedValue = resolvedTypeValues.get(boundEventActor)
+      if (!resolvedValue) continue
+
+      if (Array.isArray(resolvedValue)) {
+        for (const value of resolvedValue) {
+          resolvedSubjects.add(value)
+        }
+      } else {
+        resolvedSubjects.add(resolvedValue)
+      }
+    }
+
+    if (resolvedSubjects.size) {
+      return [...resolvedSubjects]
+    }
+  }
+
+  if (boundEventActors.length) {
+    return boundEventActors
+  }
+
+  const fallbackSubject = getEventSubject(subjectType, zapReceipt)
+  return fallbackSubject ? [fallbackSubject] : []
 }
 
 // A generic callback for interpreting interactions from individual tags
@@ -185,6 +262,18 @@ export async function applyZapInteractions(instance : NostrInterpreterClass<Nost
   const subjectType = instance.params.subjectType
   if(!subjectType || !instance.allowedSubjectTypes.includes(subjectType)) 
     return undefined
+
+  const eventActorMode = instance.getPovActorContext()?.actorMode === 'event'
+  const isEventActorPair = (actorType === 'P' && isEventType(subjectType)) || (isEventType(actorType) && subjectType === 'P')
+  if (eventActorMode && !isEventActorPair) {
+    console.log(
+      "GrapeRank : nostr interpreter : applyZapInteractions : skipped unsupported event-actor pair actorType=",
+      actorType,
+      "subjectType=",
+      subjectType,
+    )
+    return new Map()
+  }
   
   let fetchedIndex = dos - 1
   const fetchedSet = instance.fetched[fetchedIndex]
@@ -197,36 +286,51 @@ export async function applyZapInteractions(instance : NostrInterpreterClass<Nost
 
   for(let zapReceipt of fetchedSet) {
     // Per NIP-57: zap receipt pubkey is the lightning server, not the sender or recipient
-    // Sender is in uppercase 'P' tag, recipient is in lowercase 'p' tag
+    // Sender is in uppercase 'P' tag (fallback: embedded zap request pubkey in description),
+    // recipient is in lowercase 'p' tag.
     
-    const sender = getEventSubject('P', zapReceipt)
+    const sender = resolveZapSenderPubkey(zapReceipt)
     if(!sender) {
       skippedInvalid++
       continue
     }
-    
+
     const recipient = getEventSubject('p', zapReceipt)
-    if(!recipient) {
+    const requiresRecipient = actorType === 'p' || subjectType === 'p'
+    if(requiresRecipient && !recipient) {
       skippedInvalid++
       continue
     }
 
-    let subject = subjectType === 'P'
-      ? sender
-      : subjectType === 'p'
-        ? recipient
-        : getEventSubject(subjectType, zapReceipt)
-    if(!subject) {
-      skippedInvalid++
-      continue
+    let zapActors: actorId[] = []
+    let zapSubjects: subjectId[] = []
+
+    if (actorType === 'P' && isEventType(subjectType)) {
+      zapActors = [sender]
+      zapSubjects = getEventActorResolvedSubjects(instance, dos, zapReceipt, subjectType)
+    } else if (isEventType(actorType) && subjectType === 'P') {
+      zapActors = getActorsForEvent(instance, dos, zapReceipt, actorType, { requireBoundActors: eventActorMode })
+      zapSubjects = [sender]
+    } else {
+      const subject = subjectType === 'P'
+        ? sender
+        : subjectType === 'p'
+          ? recipient
+          : getEventSubject(subjectType, zapReceipt)
+      if(subject) {
+        zapSubjects = [subject]
+      }
+
+      zapActors = isEventType(actorType)
+        ? getActorsForEvent(instance, dos, zapReceipt, actorType, { requireBoundActors: eventActorMode })
+        : actorType === 'P'
+          ? [sender]
+          : recipient
+            ? [recipient]
+            : []
     }
 
-    const actors = isEventType(actorType)
-      ? getActorsForEvent(instance, dos, zapReceipt, actorType)
-      : actorType === 'P'
-        ? [sender]
-        : [recipient]
-    if(!actors.length) {
+    if(!zapActors.length || !zapSubjects.length) {
       skippedInvalid++
       continue
     }
@@ -282,20 +386,22 @@ export async function applyZapInteractions(instance : NostrInterpreterClass<Nost
       }
     }
     
-    for(const actor of actors) {
-      let actorInteractions = newInteractionsMap.get(actor)
+    for(const zapActor of zapActors) {
+      let actorInteractions = newInteractionsMap.get(zapActor)
       if(!actorInteractions) {
         actorInteractions = new Map<string, InteractionData>()
-        newInteractionsMap.set(actor, actorInteractions)
+        newInteractionsMap.set(zapActor, actorInteractions)
       }
 
-      if(actorInteractions.has(subject)) {
-        duplicateInteractions++
-        continue
-      }
+      for (const zapSubject of zapSubjects) {
+        if(actorInteractions.has(zapSubject)) {
+          duplicateInteractions++
+          continue
+        }
 
-      actorInteractions.set(subject, {confidence, value, dos})
-      totalInteractions++
+        actorInteractions.set(zapSubject, {confidence, value, dos})
+        totalInteractions++
+      }
     }
   }
 

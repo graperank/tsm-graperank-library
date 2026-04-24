@@ -150,6 +150,8 @@ export function parseServiceRequest(
   if (!configs.type && configs.interpreters.length > 0) {
     const firstInterpreter = configs.interpreters[0]
     if (firstInterpreter.params && 'subjectType' in firstInterpreter.params) {
+      // If requestors omit config:type we infer from the first interpreter's subjectType.
+      // This can intentionally produce event-reference outputs (e/a) for event-centric flows.
       configs.type = (firstInterpreter.params as any).subjectType
     }
   }

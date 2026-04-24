@@ -4,9 +4,9 @@ import { InterpreterFactory } from '../nostr-interpreters/factory'
 
 describe('Nostr Attestor Recommendations Interpreter (31873)', () => {
   test('should create recommender->attestor interaction and scale by k tags with cap', async () => {
-    const RECOMMENDER = 'recommender'.repeat(6) // 66, but hex validation not enforced here
-    const ATTESTOR_1 = 'attestor'.repeat(8)
-    const ATTESTOR_2 = 'attestor2'.repeat(7) + 'ab'
+    const RECOMMENDER = 'a'.repeat(64)
+    const ATTESTOR_1 = 'b'.repeat(64)
+    const ATTESTOR_2 = 'c'.repeat(64)
 
     const recommendation: NostrEvent = {
       id: 'recommendation'.repeat(6),

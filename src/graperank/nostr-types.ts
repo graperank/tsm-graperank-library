@@ -1,4 +1,4 @@
-import type { EventReferenceType } from '../nostr-interpreters/types'
+import type { EventReferenceType, NostrType } from '../nostr-interpreters/types'
 import type { RankedPov, actorId } from './types'
 
 export type EventActorReference = {
@@ -11,6 +11,8 @@ export type EventActorBindings = Map<string, Set<actorId>>
 
 export type PovActorContext = {
   actorMode: 'pubkey' | 'event'
+  povType: NostrType
   rankedPov: RankedPov
   eventActorReferenceMap?: Map<actorId, EventActorReference>
+  eventActorResolvedTypeValues?: Map<actorId, string | string[]>
 }

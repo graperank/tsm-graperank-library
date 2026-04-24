@@ -50,7 +50,10 @@ export async function executeServiceRequest(
 
   const onInterpreterStatus = async (status: InterpreterStatus): Promise<boolean> => {
     if (verboseFeedback && callbacks?.onFeedbackEvent) {
-      const message = `Interpreter ${status.interpreterId} DOS ${status.dos || 0}: ${status.authors} actors, ${status.fetched?.[0] || 0} events fetched (${status.fetched?.[1] || 0}ms), ${status.interpreted?.[0] || 0} interactions interpreted (${status.interpreted?.[1] || 0}ms)`
+      const fetchProgressMessage = status.fetchProgress
+        ? `, fetch progress ${status.fetchProgress.processedActors}/${status.fetchProgress.totalActors} actors`
+        : ''
+      const message = `Interpreter ${status.interpreterId} DOS ${status.dos || 0}: ${status.authors} actors${fetchProgressMessage}, ${status.fetched?.[0] || 0} events fetched (${status.fetched?.[1] || 0}ms), ${status.interpreted?.[0] || 0} interactions interpreted (${status.interpreted?.[1] || 0}ms)`
       await sendFeedback(requestEvent, 'info', message, callbacks.onFeedbackEvent)
     }
     return true

@@ -130,7 +130,7 @@ InterpreterFactory.set('nostr-9735', () => new NostrInterpreterClass<ZapParams>(
     label: "Zap Network",
     description: 'Interprets zap reciepts from zap requests published by actors or subjects. Accepts `<` and `>` prefixed params (eg: <1000) allowing requestors to specify interaction values based on zap amount.',
     allowedActorTypes: ['P', 'p', 'e', 'a'],
-    allowedSubjectTypes: ['P', 'p'],
+    allowedSubjectTypes: ['P', 'p', 'e', 'a'],
     defaultParams : {
       value : 1,
       confidence : .5,

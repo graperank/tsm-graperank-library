@@ -4,8 +4,8 @@ import { InterpreterFactory } from '../nostr-interpreters/factory'
 
 describe('Nostr Attestations Interpreter (31871)', () => {
   test('should apply valid/invalid values and ignore revoked attestations by shared d tag', async () => {
-    const ATTESTOR = 'attestor'.repeat(8)
-    const ASSERTOR = 'assertor'.repeat(8)
+    const ATTESTOR = 'a'.repeat(64)
+    const ASSERTOR = 'b'.repeat(64)
 
     const dTag = 'attestor:claim-1'
 

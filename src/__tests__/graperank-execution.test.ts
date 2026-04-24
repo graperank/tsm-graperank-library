@@ -3,6 +3,7 @@ import { parseServiceRequest } from '../tsm/requests'
 import { InterpretationController, InterpretersMap } from '../graperank/interpretation'
 import { CalculationController } from '../graperank/calculation'
 import { InterpreterFactory } from '../nostr-interpreters/factory'
+import type { InterpreterStatus } from '../graperank/types'
 
 describe('GrapeRank Full Execution with Mock Data', () => {
   // Track all SimplePool instances for cleanup
@@ -415,6 +416,101 @@ describe('GrapeRank Full Execution with Mock Data', () => {
       expect(interpretationOutput).toBeDefined()
       expect(interpretationOutput!.pov.length).toBe(0)
       expect(interpretationOutput!.interactions.length).toBe(0)
+    }, 30000)
+
+    test('should emit fetch progress updates in event-actor mode', async () => {
+      const mockInteractions = new Map()
+      const mockFetched = [new Set<NostrEvent>()]
+      const statusUpdates: InterpreterStatus[] = []
+
+      const createEventActorMockInterpreter = () => {
+        return {
+          interpreterId: 'nostr-3' as const,
+          label: 'Mock Event Actor Interpreter',
+          description: 'Test interpreter for fetch progress',
+          params: { value: 1, confidence: 1, subjectType: 'p' },
+          fetched: mockFetched,
+          interactions: mockInteractions,
+
+          resolvePovContext: async () => ({
+            actorMode: 'event' as const,
+            povType: 'p' as const,
+            rankedPov: [
+              ['event:e:actor-1', undefined] as [string, number?],
+              ['event:e:actor-2', undefined] as [string, number?],
+            ],
+          }),
+
+          fetchData: async (_actors?: Set<string>, onFetchProgress?: (progress: {
+            processedActors: number
+            totalActors: number
+            fetchedEvents: number
+            elapsedMs: number
+          }) => void | Promise<void>) => {
+            if (onFetchProgress) {
+              await onFetchProgress({
+                processedActors: 0,
+                totalActors: 2,
+                fetchedEvents: 0,
+                elapsedMs: 0,
+              })
+              await onFetchProgress({
+                processedActors: 1,
+                totalActors: 2,
+                fetchedEvents: 1,
+                elapsedMs: 10,
+              })
+            }
+
+            mockFetched[0] = new Set(mockFollowEvents.slice(0, 1))
+            return 1
+          },
+
+          interpret: async () => {
+            mockInteractions.clear()
+            mockInteractions.set('event:e:actor-1', new Map([
+              [SUBJECT_A, { value: 1, confidence: 1, dos: 1 }]
+            ]))
+            return mockInteractions
+          },
+
+          resolveActors: async () => new Set(['event:e:actor-1', 'event:e:actor-2'])
+        }
+      }
+
+      const interpretationInput = {
+        type: 'p' as const,
+        pov: [POV_PUBKEY_1],
+        requests: [{ id: 'nostr-3' as const, iterate: 1 }]
+      }
+
+      const interpretersMap = new InterpretersMap([])
+      interpretersMap.set('nostr-3', createEventActorMockInterpreter())
+      interpretationInput.requests.forEach(req => {
+        interpretersMap.setRequest(req)
+      })
+
+      const interpretationController = new InterpretationController(
+        interpretersMap,
+        async (status) => {
+          statusUpdates.push({
+            ...status,
+            fetchProgress: status.fetchProgress ? { ...status.fetchProgress } : undefined,
+            fetched: status.fetched ? [...status.fetched] as [number, number, true?] : undefined,
+            interpreted: status.interpreted ? [...status.interpreted] as [number, number, true?] : undefined,
+          })
+          return true
+        }
+      )
+
+      const interpretationOutput = await interpretationController.interpret(interpretationInput)
+
+      expect(interpretationOutput).toBeDefined()
+      const fetchProgressUpdates = statusUpdates.filter((status) => status.fetchProgress)
+
+      expect(fetchProgressUpdates.length).toBeGreaterThan(1)
+      expect(fetchProgressUpdates.some((status) => status.fetchProgress?.processedActors === 1)).toBe(true)
+      expect(fetchProgressUpdates.some((status) => status.fetchProgress?.processedActors === 2)).toBe(true)
     }, 30000)
   })
 })

@@ -1,4 +1,4 @@
-import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput } from "./types"
+import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput, InterpreterFetchProgress, InterpreterFetchProgressCallback } from "./types"
 import type { Interpreter, InterpreterInitializer, InterpreterParams } from "./types"
 import type { PovActorContext } from './nostr-types'
 import { deriveActorIdsFromRankedPov, normalizePov } from "../nostr-interpreters/helpers"
@@ -87,6 +87,14 @@ export class InterpretationController {
           // if(currentActors.has(DEBUGTARGET))
           //   console.log('DEBUGTARGET : interpret : target found in currentIteration actors')
           try{
+            const updateInterpreterStatus = async (status: InterpreterStatus, errorMessage: string): Promise<void> => {
+              if (!this.updateStatus) return
+              const statusUpdated = await this.updateStatus(status)
+              if (!statusUpdated) throw(errorMessage)
+            }
+
+            const isEventActorMode = povActorContext?.actorMode === 'event'
+
             interpreterStatus = {
               interpreterId : request.id,
               // FIXME dos needs to be set on initial status ... 
@@ -94,17 +102,44 @@ export class InterpretationController {
               dos : request.iterate ? this.interpreters.get(request.id)?.fetched?.length || 0 : undefined,
               authors : currentActors.size
             }
-            if(this.updateStatus && !await this.updateStatus(interpreterStatus)) throw('failed updating initial status')
+            await updateInterpreterStatus(interpreterStatus, 'failed updating initial status')
             let fetchstart = Date.now()
+
+            const onFetchProgress: InterpreterFetchProgressCallback | undefined = isEventActorMode
+              ? async (fetchProgress: InterpreterFetchProgress): Promise<void> => {
+                  interpreterStatus.fetchProgress = fetchProgress
+                  interpreterStatus.fetched = [
+                    fetchProgress.fetchedEvents,
+                    fetchProgress.elapsedMs,
+                  ]
+                  await updateInterpreterStatus(interpreterStatus, 'failed updating status during fetch progress')
+                  if (this.onKeepAlive) {
+                    this.onKeepAlive()
+                  }
+                }
+              : undefined
+
             // fetch interpreter specific dataset for requestActors OR newActors OR allActors
             // pass currentSubjects from previous iteration
-            let dos = await this.interpreters.fetchData(request.id, currentActors) || 1
+            let dos = await this.interpreters.fetchData(request.id, currentActors, onFetchProgress) || 1
+            const fetchDurationMs = Date.now() - fetchstart
+            const fetchedEventsCount = this.interpreters.get(request.id)?.fetched[dos -1]?.size || 0
+
+            if (isEventActorMode) {
+              interpreterStatus.fetchProgress = {
+                processedActors: currentActors.size,
+                totalActors: currentActors.size,
+                fetchedEvents: fetchedEventsCount,
+                elapsedMs: fetchDurationMs,
+              }
+            }
+
             interpreterStatus.fetched = [
-                this.interpreters.get(request.id)?.fetched[dos -1]?.size || 0, // number of fetched events
-                Date.now() - fetchstart, // duration of fetch request
+                fetchedEventsCount, // number of fetched events
+                fetchDurationMs, // duration of fetch request
                 currentIteration == maxIterations ? true : undefined // final DOS iteration ?
               ]
-            if(this.updateStatus && !await this.updateStatus(interpreterStatus)) throw('failed updating status after fetch')
+            await updateInterpreterStatus(interpreterStatus, 'failed updating status after fetch')
             let interpretstart = Date.now()
             // interpret fetched data and get interactions for next iteration
             newInteractions = await this.interpreters.interpret(request.id, dos)
@@ -114,7 +149,7 @@ export class InterpretationController {
                 Date.now() - interpretstart, // duration of interpretation
                 currentIteration == maxIterations ? true : undefined // final DOS iteration ?
               ]
-            if(this.updateStatus && !await this.updateStatus(interpreterStatus)) throw('failed updating status after interpret')
+            await updateInterpreterStatus(interpreterStatus, 'failed updating status after interpret')
 
             console.log("GrapeRank : interpret : ",request.id," protocol : interpretation complete for iteration ",currentIteration)
 
@@ -287,8 +322,12 @@ export class InterpretersMap extends Map<InterpreterId<any>, Interpreter<Interpr
     })
   }
 
-  async fetchData(interpreterId:InterpreterId<any>, actors?: Set<actorId>){
-    return await this.get(interpreterId)?.fetchData(actors)
+  async fetchData(
+    interpreterId:InterpreterId<any>,
+    actors?: Set<actorId>,
+    onFetchProgress?: InterpreterFetchProgressCallback,
+  ){
+    return await this.get(interpreterId)?.fetchData(actors, onFetchProgress)
   }
 
   async interpret(interpreter : InterpreterId<any>, dos : number){

@@ -121,10 +121,22 @@ export type InterpretationOutput = {
   pov: RankedPov
 }
 
+export type InterpreterFetchProgress = {
+  processedActors: number
+  totalActors: number
+  fetchedEvents: number
+  elapsedMs: number
+}
+
+export type InterpreterFetchProgressCallback = (
+  progress: InterpreterFetchProgress
+) => void | Promise<void>
+
 export type InterpreterStatus = {
   interpreterId: InterpreterId<any>
   dos?: dos
   authors: number
+  fetchProgress?: InterpreterFetchProgress
   fetched?: [number, number, true?]
   interpreted?: [number, number, true?]
 }
@@ -152,7 +164,11 @@ export interface Interpreter<ParamsType extends InterpreterParams> {
   // fetchData() fetches data from the network
   // This will be called once per interpreter iteration 
   // to fetch interactions initiated by the given actors
-  fetchData(this: Interpreter<ParamsType>, actors?: Set<actorId>): Promise<number>
+  fetchData(
+    this: Interpreter<ParamsType>,
+    actors?: Set<actorId>,
+    onFetchProgress?: InterpreterFetchProgressCallback,
+  ): Promise<number>
   // interpret() interprets the fetched data
   interpret(this: Interpreter<ParamsType>, fetchedIndex?: number): Promise<InteractionsMap | undefined>
 }

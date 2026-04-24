@@ -1,5 +1,5 @@
 import { NostrEvent, NostrFilter, npubEncode, decode, SimplePool, useWebSocketImplementation } from '../lib/nostr-tools'
-import { RankedPov, subjectId, Interpreter, InterpreterRequest, InteractionsMap, actorId, InterpreterInitializer, InterpreterParams, InterpreterId, InteractionData, povType } from "../graperank/types"
+import { RankedPov, subjectId, Interpreter, InterpreterRequest, InteractionsMap, actorId, InterpreterInitializer, InterpreterParams, InterpreterId, InteractionData, povType, InterpreterFetchProgress, InterpreterFetchProgressCallback } from "../graperank/types"
 import { EventActorReference, EventActorBindings, PovActorContext } from '../graperank/nostr-types'
 import { EventReferenceTarget, EventReferenceTypes, NostrEventField, NostrEventFields, NostrInterpreterClassConfig, NostrInterpreterId, NostrInterpreterKeys, NostrInterpreterParams, NostrType } from "./types"
 import { applyInteractionsByTag } from "./callbacks"
@@ -12,6 +12,8 @@ const delaybetweenfetches = 500 // milliceconds
 const fetchRetryAttempts = 3
 const fetchRetryBackoffMs = 250
 const eventActorFetchConcurrency = 20
+const eventActorProgressActorsStep = 50
+const eventActorProgressIntervalMs = 5000
 const eventIdField: NostrEventField = NostrEventFields[0]
 const eventIdReferenceType = EventReferenceTypes[0]
 export class NostrInterpreterFactory extends InterpreterFactory<"nostr"> {
@@ -313,7 +315,65 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     return this.extractActorsFromEvents(new Set(referencedEvents.values()), requestedType)
   }
 
-  private buildEventActorContext(sourceEvents: Set<NostrEvent>): PovActorContext | undefined {
+  private mergeResolvedTypeValue(
+    targetMap: Map<actorId, string | string[]>,
+    actor: actorId,
+    resolvedValue: string | string[],
+  ): void {
+    const nextValues = Array.isArray(resolvedValue) ? resolvedValue : [resolvedValue]
+    const existing = targetMap.get(actor)
+    const existingValues = existing === undefined
+      ? []
+      : (Array.isArray(existing) ? existing : [existing])
+    const mergedValues = [...new Set([...existingValues, ...nextValues])]
+
+    if (!mergedValues.length) return
+
+    targetMap.set(actor, mergedValues.length === 1 ? mergedValues[0] : mergedValues)
+  }
+
+  private async resolveEventActorTypeValues(
+    eventActorReferenceMap: Map<actorId, EventActorReference>,
+    requestedType: NostrType,
+    fallbackRelays: string[],
+  ): Promise<Map<actorId, string | string[]>> {
+    const resolvedTypeValues = new Map<actorId, string | string[]>()
+
+    for (const [eventActorId, eventActorReference] of eventActorReferenceMap.entries()) {
+      let filter: NostrFilter | undefined
+
+      if (eventActorReference.referenceType === eventIdReferenceType) {
+        filter = { ids: [eventActorReference.value] }
+      } else {
+        const coordinate = parseCoordinate(eventActorReference.value)
+        if (!coordinate) continue
+        filter = {
+          kinds: [coordinate.kind],
+          authors: [coordinate.pubkey],
+          '#d': [coordinate.identifier],
+        }
+      }
+
+      const relays = mergeRelayLists(eventActorReference.relayHints, fallbackRelays)
+      if (!relays.length) continue
+
+      const referencedEvents = await this.fetchEventsWithRetry(filter, relays)
+      const extractedTypeValues = [...this.extractActorsFromEvents(referencedEvents, requestedType)]
+      if (!extractedTypeValues.length) continue
+
+      resolvedTypeValues.set(
+        eventActorId,
+        extractedTypeValues.length === 1 ? extractedTypeValues[0] : extractedTypeValues,
+      )
+    }
+
+    return resolvedTypeValues
+  }
+
+  private buildEventActorContext(sourceEvents: Set<NostrEvent>): {
+    rankedPov: RankedPov
+    eventActorReferenceMap: Map<actorId, EventActorReference>
+  } | undefined {
     const rankedActorMap = new Map<actorId, number | undefined>()
     const eventActorReferenceMap = new Map<actorId, EventActorReference>()
 
@@ -338,7 +398,6 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     if (!rankedActorMap.size) return undefined
 
     return {
-      actorMode: 'event',
       rankedPov: [...rankedActorMap.entries()],
       eventActorReferenceMap,
     }
@@ -371,6 +430,7 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
 
     const rankedActorMap = new Map<actorId, number | undefined>()
     const eventActorReferenceMap = new Map<actorId, EventActorReference>()
+    const eventActorResolvedTypeValues = new Map<actorId, string | string[]>()
     let actorMode: 'pubkey' | 'event' = 'pubkey'
     const povArray = Array.isArray(pov) ? pov : [pov]
 
@@ -406,6 +466,15 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
                 if (!eventActorReferenceMap.has(rankedActorId)) {
                   eventActorReferenceMap.set(rankedActorId, eventActorReference)
                 }
+              })
+
+              const resolvedTypeValues = await this.resolveEventActorTypeValues(
+                eventActorContext.eventActorReferenceMap,
+                requestedType,
+                relays,
+              )
+              resolvedTypeValues.forEach((resolvedValue, rankedActorId) => {
+                this.mergeResolvedTypeValue(eventActorResolvedTypeValues, rankedActorId, resolvedValue)
               })
             }
             continue
@@ -444,8 +513,12 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
 
     const context: PovActorContext = {
       actorMode: effectiveActorMode,
+      povType: requestedType,
       rankedPov,
       eventActorReferenceMap: effectiveActorMode === 'event' && eventActorReferenceMap.size ? eventActorReferenceMap : undefined,
+      eventActorResolvedTypeValues: effectiveActorMode === 'event' && eventActorResolvedTypeValues.size
+        ? eventActorResolvedTypeValues
+        : undefined,
     }
 
     this.povActorContext = context
@@ -569,10 +642,46 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     return [{ ...baseFilter, '#a': [eventActorReference.value] }]
   }
 
-  private async fetchDataByEventActors(actors: Set<actorId>): Promise<number> {
+  private async fetchDataByEventActors(
+    actors: Set<actorId>,
+    onFetchProgress?: InterpreterFetchProgressCallback,
+  ): Promise<number> {
     const fetchedSet: Set<NostrEvent> = new Set()
     const eventActorBindings: EventActorBindings = new Map()
     const eventActorIds = [...actors]
+    const totalActors = eventActorIds.length
+    const fetchStartMs = Date.now()
+    let processedActors = 0
+    let lastProgressUpdateMs = 0
+    let progressUpdateChain: Promise<void> = Promise.resolve()
+
+    const queueProgressUpdate = (force = false): void => {
+      if (!onFetchProgress || !totalActors) return
+
+      const now = Date.now()
+      const reachedActorStep = processedActors % eventActorProgressActorsStep === 0
+      const reachedInterval = now - lastProgressUpdateMs >= eventActorProgressIntervalMs
+      const fetchComplete = processedActors >= totalActors
+
+      if (!force && !fetchComplete && !reachedActorStep && !reachedInterval) {
+        return
+      }
+
+      lastProgressUpdateMs = now
+
+      const fetchProgress: InterpreterFetchProgress = {
+        processedActors,
+        totalActors,
+        fetchedEvents: fetchedSet.size,
+        elapsedMs: now - fetchStartMs,
+      }
+
+      progressUpdateChain = progressUpdateChain
+        .then(() => Promise.resolve(onFetchProgress(fetchProgress)))
+        .catch((error) => {
+          console.log(`GrapeRank : ${this.interpreterId} : fetchDataByEventActors : progress callback failed`, error)
+        })
+    }
 
     if (eventActorIds.length === 0) {
       const dos = this.fetched.push(fetchedSet)
@@ -580,44 +689,53 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
       return dos
     }
 
+    queueProgressUpdate(true)
+
     const workerCount = Math.min(eventActorFetchConcurrency, eventActorIds.length)
     const workerPromises: Promise<void>[] = []
 
     for (let workerIndex = 0; workerIndex < workerCount; workerIndex++) {
       workerPromises.push((async () => {
         for (let eventActorIndex = workerIndex; eventActorIndex < eventActorIds.length; eventActorIndex += workerCount) {
-          const eventActorId = eventActorIds[eventActorIndex]
-          const eventActorReference = this.povActorContext?.eventActorReferenceMap?.get(eventActorId) || parseEventActorId(eventActorId)
-          if (!eventActorReference) continue
+          try {
+            const eventActorId = eventActorIds[eventActorIndex]
+            const eventActorReference = this.povActorContext?.eventActorReferenceMap?.get(eventActorId) || parseEventActorId(eventActorId)
+            if (!eventActorReference) continue
 
-          const relays = mergeRelayLists(eventActorReference.relayHints, NostrInterpreterClass.relays)
-          if (!relays.length) continue
+            const relays = mergeRelayLists(eventActorReference.relayHints, NostrInterpreterClass.relays)
+            if (!relays.length) continue
 
-          const eventActorReferenceFilters = this.buildEventActorReferenceFetchFilters(eventActorReference)
+            const eventActorReferenceFilters = this.buildEventActorReferenceFetchFilters(eventActorReference)
 
-          await sleep(delaybetweenfetches)
-          const fetchedEventSets = await Promise.all(
-            eventActorReferenceFilters.map((filter) => this.fetchEventsWithRetry(filter, relays))
-          )
+            await sleep(delaybetweenfetches)
+            const fetchedEventSets = await Promise.all(
+              eventActorReferenceFilters.map((filter) => this.fetchEventsWithRetry(filter, relays))
+            )
 
-          for (const fetchedEvents of fetchedEventSets) {
-            for (const event of fetchedEvents) {
-              fetchedSet.add(event)
+            for (const fetchedEvents of fetchedEventSets) {
+              for (const event of fetchedEvents) {
+                fetchedSet.add(event)
 
-              let bindings = eventActorBindings.get(event.id)
-              if (!bindings) {
-                bindings = new Set<actorId>()
-                eventActorBindings.set(event.id, bindings)
+                let bindings = eventActorBindings.get(event.id)
+                if (!bindings) {
+                  bindings = new Set<actorId>()
+                  eventActorBindings.set(event.id, bindings)
+                }
+
+                bindings.add(eventActorId)
               }
-
-              bindings.add(eventActorId)
             }
+          } finally {
+            processedActors += 1
+            queueProgressUpdate()
           }
         }
       })())
     }
 
     await Promise.all(workerPromises)
+    queueProgressUpdate(true)
+    await progressUpdateChain
 
     const dos = this.fetched.push(fetchedSet)
     this.eventActorBindingsByDos[dos - 1] = eventActorBindings
@@ -627,13 +745,16 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   // breaks up a large actors list into multiple actors lists 
   // suitable for relay requests, and sends them all in parallel
   // returns a single promise that is resolved when all fetches are complete.
-  async fetchData(actors? : Set<actorId>) : Promise<number> {
+  async fetchData(
+    actors? : Set<actorId>,
+    onFetchProgress?: InterpreterFetchProgressCallback,
+  ) : Promise<number> {
     // get actors from request if not provided
     if(!this.request) throw('no request set for this interpreter')
     actors = actors || new Set(this.request?.actors)
 
     if (this.povActorContext?.actorMode === 'event') {
-      return this.fetchDataByEventActors(actors)
+      return this.fetchDataByEventActors(actors, onFetchProgress)
     }
     
 
