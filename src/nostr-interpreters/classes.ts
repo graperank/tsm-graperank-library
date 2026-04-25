@@ -14,6 +14,7 @@ const fetchRetryBackoffMs = 250
 const eventActorFetchConcurrency = 20
 const eventActorProgressActorsStep = 50
 const eventActorProgressIntervalMs = 5000
+const eventActorReferenceBatchSize = maxfetch
 const eventIdField: NostrEventField = NostrEventFields[0]
 const eventIdReferenceType = EventReferenceTypes[0]
 export class NostrInterpreterFactory extends InterpreterFactory<"nostr"> {
@@ -338,30 +339,87 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     fallbackRelays: string[],
   ): Promise<Map<actorId, string | string[]>> {
     const resolvedTypeValues = new Map<actorId, string | string[]>()
+    // Group event-id references by relay set so we can batch-fetch ids instead of
+    // issuing one relay request per referenced event actor.
+    const eventIdReferencesByRelayKey = new Map<string, {
+      relays: string[]
+      actorIdsByEventId: Map<string, actorId[]>
+    }>()
+    // Address references keep per-reference filters because kind/author/d must stay paired.
+    const addressReferences: Array<{ eventActorId: actorId; eventActorReference: EventActorReference; relays: string[] }> = []
 
     for (const [eventActorId, eventActorReference] of eventActorReferenceMap.entries()) {
-      let filter: NostrFilter | undefined
-
-      if (eventActorReference.referenceType === eventIdReferenceType) {
-        filter = { ids: [eventActorReference.value] }
-      } else {
-        const coordinate = parseCoordinate(eventActorReference.value)
-        if (!coordinate) continue
-        filter = {
-          kinds: [coordinate.kind],
-          authors: [coordinate.pubkey],
-          '#d': [coordinate.identifier],
-        }
-      }
-
       const relays = mergeRelayLists(eventActorReference.relayHints, fallbackRelays)
       if (!relays.length) continue
+
+      if (eventActorReference.referenceType === eventIdReferenceType) {
+        const relayKey = relays.join('|')
+        const normalizedEventId = eventActorReference.value.toLowerCase()
+        let relayGroup = eventIdReferencesByRelayKey.get(relayKey)
+
+        if (!relayGroup) {
+          relayGroup = {
+            relays,
+            actorIdsByEventId: new Map<string, actorId[]>(),
+          }
+          eventIdReferencesByRelayKey.set(relayKey, relayGroup)
+        }
+
+        const actorIds = relayGroup.actorIdsByEventId.get(normalizedEventId) || []
+        actorIds.push(eventActorId)
+        relayGroup.actorIdsByEventId.set(normalizedEventId, actorIds)
+        continue
+      }
+
+      addressReferences.push({ eventActorId, eventActorReference, relays })
+    }
+
+    // Resolve event-id references in batches, preserving relay scoping and actor bindings.
+    for (const relayGroup of eventIdReferencesByRelayKey.values()) {
+      const eventIds = [...relayGroup.actorIdsByEventId.keys()]
+      const eventIdChunks = eventIds.length > eventActorReferenceBatchSize
+        ? sliceBigArray(eventIds, eventActorReferenceBatchSize)
+        : [eventIds]
+
+      for (const eventIdChunk of eventIdChunks) {
+        const referencedEvents = await this.fetchEventsWithRetry({ ids: eventIdChunk }, relayGroup.relays)
+
+        for (const referencedEvent of referencedEvents) {
+          const actorIds = relayGroup.actorIdsByEventId.get(referencedEvent.id.toLowerCase())
+          if (!actorIds?.length) continue
+
+          const extractedTypeValues = [...this.extractActorsFromEvents(new Set([referencedEvent]), requestedType)]
+          if (!extractedTypeValues.length) continue
+
+          const resolvedValue: string | string[] = extractedTypeValues.length === 1
+            ? extractedTypeValues[0]
+            : extractedTypeValues
+
+          for (const actorIdForReference of actorIds) {
+            this.mergeResolvedTypeValue(resolvedTypeValues, actorIdForReference, resolvedValue)
+          }
+        }
+      }
+    }
+
+    // Resolve address references with strict coordinate filters.
+    for (const { eventActorId, eventActorReference, relays } of addressReferences) {
+      let filter: NostrFilter | undefined
+
+      const coordinate = parseCoordinate(eventActorReference.value)
+      if (!coordinate) continue
+      filter = {
+        kinds: [coordinate.kind],
+        authors: [coordinate.pubkey],
+        '#d': [coordinate.identifier],
+      }
 
       const referencedEvents = await this.fetchEventsWithRetry(filter, relays)
       const extractedTypeValues = [...this.extractActorsFromEvents(referencedEvents, requestedType)]
       if (!extractedTypeValues.length) continue
 
-      resolvedTypeValues.set(
+      this.mergeResolvedTypeValue(
+        resolvedTypeValues,
         eventActorId,
         extractedTypeValues.length === 1 ? extractedTypeValues[0] : extractedTypeValues,
       )
