@@ -1,6 +1,6 @@
 {
   "name": "@graperank/tsm-graperank-library",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "GrapeRank TSM (Trust Service Machines) - a highly configurable TSM service for ranking Nostr users and content.",
   "type": "module",
   "main": "./dist/index.cjs",
