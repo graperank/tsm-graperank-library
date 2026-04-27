@@ -3,6 +3,7 @@ import { InterpretationController, InterpretersMap } from '../graperank/interpre
 import { CalculationController } from '../graperank/calculation'
 import { InterpreterFactory } from '../nostr-interpreters/factory'
 import { PubkeyTypes } from '../nostr-interpreters/types'
+import { parseCoordinate, parseEventActorId, validatePubkey } from '../nostr-interpreters/helpers'
 import { UnsignedEvent, MetricsCollector, RequestMetrics } from './types'
 import { ParsedServiceRequest } from './requests'
 import { InterpreterStatus, CalculatorIterationStatus } from '../graperank/types'
@@ -269,9 +270,23 @@ export function generateRankingOutputEvent(
   }
 ): UnsignedEvent {
   const requestedType = requestEvent.tags.find(t => t[0] === 'config' && t[1] === 'type')?.[2]
-  const resultTagName = requestedType && PubkeyTypes.includes(requestedType as typeof PubkeyTypes[number])
-    ? 'p'
-    : (requestedType || 'p')
+  const resultTagName = getRankingOutputTagName(requestedType)
+  const { validRankings, invalidCount } = coerceAndFilterRankingsByTagName(rankings, resultTagName)
+
+  // Validation is enforced here so malformed ranking subjects never reach relays.
+  if (invalidCount > 0) {
+    console.warn(
+      `[output] request=${requestEvent.id.slice(0, 8)} filtered=${invalidCount}/${rankings.length} invalid '${resultTagName}' ranking subjects`,
+    )
+  }
+
+  if (rankings.length > 0 && validRankings.length === 0) {
+    throw new ServiceOutputError(
+      `output validation failed: no valid '${resultTagName}' ranking subjects (filtered ${invalidCount}/${rankings.length}) for request ${requestEvent.id.slice(0, 8)}`,
+      'output',
+    )
+  }
+
   const requestDTag = requestEvent.tags.find(t => t[0] === 'd')?.[1]
   
   const tags: string[][] = [
@@ -303,7 +318,7 @@ export function generateRankingOutputEvent(
     }
   }
 
-  rankings.forEach(([subject, data]) => {
+  validRankings.forEach(([subject, data]) => {
     const rank = data.rank ?? 0
     const confidence = data.confidence ?? 0
     tags.push([
@@ -320,6 +335,120 @@ export function generateRankingOutputEvent(
     tags,
     content: ''
   }
+}
+
+function getRankingOutputTagName(requestedType?: string): string {
+  return requestedType && PubkeyTypes.includes(requestedType as typeof PubkeyTypes[number])
+    ? 'p'
+    : (requestedType || 'p')
+}
+
+function coerceAndFilterRankingsByTagName(
+  rankings: [string, { rank?: number; confidence?: number }][],
+  tagName: string,
+): {
+  validRankings: [string, { rank?: number; confidence?: number }][]
+  invalidCount: number
+} {
+  const validRankings: [string, { rank?: number; confidence?: number }][] = []
+  let invalidCount = 0
+
+  for (const [subject, data] of rankings) {
+    const coercedSubject = coerceRankingSubjectForTag(tagName, subject)
+    if (!coercedSubject || !isValidRankingSubjectForTag(tagName, coercedSubject)) {
+      invalidCount += 1
+      continue
+    }
+
+    validRankings.push([coercedSubject, data])
+  }
+
+  return {
+    validRankings,
+    invalidCount,
+  }
+}
+
+// Best-effort coercion pass before output emission.
+// This is intentionally focused on current p/e/a needs and can be expanded later
+// into a generic cross-type coercion strategy if we need richer conversions.
+function coerceRankingSubjectForTag(tagName: string, subject: string): string | undefined {
+  const normalizedSubject = subject?.trim()
+  if (!normalizedSubject) return undefined
+
+  if (tagName === 'p') {
+    if (validatePubkey(normalizedSubject)) return normalizedSubject
+
+    const parsedEventActorId = parseEventActorId(normalizedSubject)
+    if (parsedEventActorId?.referenceType === 'a') {
+      const coordinate = parseCoordinate(parsedEventActorId.value)
+      if (coordinate && validatePubkey(coordinate.pubkey)) {
+        return coordinate.pubkey
+      }
+    }
+
+    const directCoordinate = parseCoordinate(normalizedSubject)
+    if (directCoordinate && validatePubkey(directCoordinate.pubkey)) {
+      return directCoordinate.pubkey
+    }
+
+    return undefined
+  }
+
+  if (tagName === 'e') {
+    if (isValidEventId(normalizedSubject)) return normalizedSubject.toLowerCase()
+
+    const parsedEventActorId = parseEventActorId(normalizedSubject)
+    if (parsedEventActorId?.referenceType === 'e' && isValidEventId(parsedEventActorId.value)) {
+      return parsedEventActorId.value.toLowerCase()
+    }
+
+    return undefined
+  }
+
+  if (tagName === 'a') {
+    const normalizedCoordinate = normalizeCoordinateValue(normalizedSubject)
+    if (normalizedCoordinate) return normalizedCoordinate
+
+    const parsedEventActorId = parseEventActorId(normalizedSubject)
+    if (parsedEventActorId?.referenceType === 'a') {
+      return normalizeCoordinateValue(parsedEventActorId.value)
+    }
+
+    return undefined
+  }
+
+  return normalizedSubject
+}
+
+function normalizeCoordinateValue(value: string): string | undefined {
+  const coordinate = parseCoordinate(value)
+  if (!coordinate || !validatePubkey(coordinate.pubkey)) return undefined
+  return `${coordinate.kind}:${coordinate.pubkey.toLowerCase()}:${coordinate.identifier}`
+}
+
+function isValidEventId(value: string): boolean {
+  return /^[0-9a-f]{64}$/i.test(value)
+}
+
+function isValidRankingSubjectForTag(tagName: string, subject: string): boolean {
+  const normalizedSubject = subject?.trim()
+  if (!normalizedSubject) return false
+
+  if (tagName === 'p') {
+    return validatePubkey(normalizedSubject)
+  }
+
+  if (tagName === 'e') {
+    return isValidEventId(normalizedSubject)
+  }
+
+  if (tagName === 'a') {
+    return !!normalizeCoordinateValue(normalizedSubject)
+  }
+
+  // For tags beyond p/e/a, preserve existing permissive behavior.
+  return true
 }
 
 async function sendFeedback(

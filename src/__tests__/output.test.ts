@@ -67,13 +67,17 @@ describe('TSM Output Generators', () => {
 
   describe('generateRankingOutputEvent', () => {
     const getRankingTags = (output: UnsignedEvent, rankingTagName = 'p'): string[][] =>
-      output.tags.filter((tag: string[]) => tag[0] === rankingTagName && tag.length === 4)
+      output.tags.filter((tag: string[]) => tag[0] === rankingTagName && tag.length === 4 && tag[3] !== 'request')
+    const validPubkey = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const validPubkey2 = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    const validPubkey3 = 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+    const validEventId = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 
     test('should generate kind 37573 ranking output event', () => {
       const rankings: [string, { rank?: number; confidence?: number }][] = [
-        ['subject1', { rank: 0.95, confidence: 0.85 }],
-        ['subject2', { rank: 0.80, confidence: 0.75 }],
-        ['subject3', { rank: 0.65, confidence: 0.60 }]
+        [validPubkey, { rank: 0.95, confidence: 0.85 }],
+        [validPubkey2, { rank: 0.80, confidence: 0.75 }],
+        [validPubkey3, { rank: 0.65, confidence: 0.60 }]
       ]
 
       const output = generateRankingOutputEvent(
@@ -93,7 +97,7 @@ describe('TSM Output Generators', () => {
 
     test('should include result tags with proper formatting', () => {
       const rankings: [string, { rank?: number; confidence?: number }][] = [
-        ['subject1', { rank: 0.123456789, confidence: 0.9876 }]
+        [validPubkey, { rank: 0.123456789, confidence: 0.9876 }]
       ]
 
       const output = generateRankingOutputEvent(
@@ -101,7 +105,7 @@ describe('TSM Output Generators', () => {
         rankings
       )
 
-      const rankingTag = output.tags.find((tag: string[]) => tag[0] === 'p' && tag[1] === 'subject1')
+      const rankingTag = output.tags.find((tag: string[]) => tag[0] === 'p' && tag[1] === validPubkey)
       expect(rankingTag).toBeDefined()
       expect(rankingTag![2]).toBe('0.123457')
       expect(rankingTag![3]).toBe('0.9876')
@@ -117,12 +121,12 @@ describe('TSM Output Generators', () => {
       }
 
       const rankings: [string, { rank?: number; confidence?: number }][] = [
-        ['subject1', { rank: 0.5, confidence: 0.8 }],
+        [validPubkey, { rank: 0.5, confidence: 0.8 }],
       ]
 
       const output = generateRankingOutputEvent(requestEventWithPubkeyType, rankings)
 
-      const pTags = output.tags.filter((tag) => tag[0] === 'p' && tag[1] === 'subject1')
+      const pTags = output.tags.filter((tag) => tag[0] === 'p' && tag[1] === validPubkey)
       const pubkeyTags = output.tags.filter((tag) => tag[0] === 'pubkey')
 
       expect(pTags.length).toBe(1)
@@ -139,21 +143,163 @@ describe('TSM Output Generators', () => {
       }
 
       const rankings: [string, { rank?: number; confidence?: number }][] = [
-        ['subject1', { rank: 0.9, confidence: 0.7 }],
+        [validPubkey, { rank: 0.9, confidence: 0.7 }],
       ]
 
       const output = generateRankingOutputEvent(requestEventWithUppercasePType, rankings)
 
-      const pTags = output.tags.filter((tag) => tag[0] === 'p' && tag[1] === 'subject1')
+      const pTags = output.tags.filter((tag) => tag[0] === 'p' && tag[1] === validPubkey)
       const uppercasePTags = output.tags.filter((tag) => tag[0] === 'P')
 
       expect(pTags.length).toBe(1)
       expect(uppercasePTags.length).toBe(0)
     })
 
+    test('filters malformed pubkey ranking subjects before emitting p tags', () => {
+      const requestEventWithPubkeyType: NostrEvent = {
+        ...mockRequestEvent,
+        tags: [
+          ['config', 'type', 'pubkey'],
+          ['config', 'pov', '"npub1test"'],
+        ],
+      }
+
+      const rankings: [string, { rank?: number; confidence?: number }][] = [
+        [validPubkey, { rank: 0.95, confidence: 0.9 }],
+        ['event:e:1234', { rank: 0.7, confidence: 0.6 }],
+      ]
+
+      const output = generateRankingOutputEvent(requestEventWithPubkeyType, rankings)
+      const rankingTags = getRankingTags(output)
+
+      expect(rankingTags).toHaveLength(1)
+      expect(rankingTags[0][1]).toBe(validPubkey)
+    })
+
+    test('best-effort coerces event:a actor ids to pubkeys for p output tags', () => {
+      const requestEventWithPubkeyType: NostrEvent = {
+        ...mockRequestEvent,
+        tags: [
+          ['config', 'type', 'pubkey'],
+          ['config', 'pov', '"npub1test"'],
+        ],
+      }
+
+      const rankings: [string, { rank?: number; confidence?: number }][] = [
+        [`event:a:30023:${validPubkey}:demo-note`, { rank: 0.9, confidence: 0.7 }],
+      ]
+
+      const output = generateRankingOutputEvent(requestEventWithPubkeyType, rankings)
+      const rankingTags = getRankingTags(output)
+
+      expect(rankingTags).toHaveLength(1)
+      expect(rankingTags[0][1]).toBe(validPubkey)
+    })
+
+    test('throws when every ranking subject is invalid for requested output tag', () => {
+      const requestEventWithPubkeyType: NostrEvent = {
+        ...mockRequestEvent,
+        tags: [
+          ['config', 'type', 'pubkey'],
+          ['config', 'pov', '"npub1test"'],
+        ],
+      }
+
+      const rankings: [string, { rank?: number; confidence?: number }][] = [
+        ['event:e:1234', { rank: 0.7, confidence: 0.6 }],
+      ]
+
+      expect(() => generateRankingOutputEvent(requestEventWithPubkeyType, rankings)).toThrow(
+        "output validation failed: no valid 'p' ranking subjects",
+      )
+    })
+
+    test('filters malformed event ids when output tag is e', () => {
+      const requestEventWithEventType: NostrEvent = {
+        ...mockRequestEvent,
+        tags: [
+          ['config', 'type', 'e'],
+          ['config', 'pov', '"note1test"'],
+        ],
+      }
+
+      const rankings: [string, { rank?: number; confidence?: number }][] = [
+        [validEventId, { rank: 0.8, confidence: 0.7 }],
+        ['not-an-event-id', { rank: 0.6, confidence: 0.5 }],
+      ]
+
+      const output = generateRankingOutputEvent(requestEventWithEventType, rankings)
+      const rankingTags = getRankingTags(output, 'e')
+
+      expect(rankingTags).toHaveLength(1)
+      expect(rankingTags[0][1]).toBe(validEventId)
+    })
+
+    test('best-effort coerces event:e actor ids to e output tags', () => {
+      const requestEventWithEventType: NostrEvent = {
+        ...mockRequestEvent,
+        tags: [
+          ['config', 'type', 'e'],
+          ['config', 'pov', '"note1test"'],
+        ],
+      }
+
+      const rankings: [string, { rank?: number; confidence?: number }][] = [
+        [`event:e:${validEventId.toUpperCase()}`, { rank: 0.8, confidence: 0.7 }],
+      ]
+
+      const output = generateRankingOutputEvent(requestEventWithEventType, rankings)
+      const rankingTags = getRankingTags(output, 'e')
+
+      expect(rankingTags).toHaveLength(1)
+      expect(rankingTags[0][1]).toBe(validEventId)
+    })
+
+    test('filters malformed coordinates when output tag is a', () => {
+      const requestEventWithAddressType: NostrEvent = {
+        ...mockRequestEvent,
+        tags: [
+          ['config', 'type', 'a'],
+          ['config', 'pov', '"naddr1test"'],
+        ],
+      }
+
+      const validCoordinate = `30023:${validPubkey}:demo-note`
+      const rankings: [string, { rank?: number; confidence?: number }][] = [
+        [validCoordinate, { rank: 0.8, confidence: 0.7 }],
+        ['30023:not-a-pubkey:demo-note', { rank: 0.6, confidence: 0.5 }],
+      ]
+
+      const output = generateRankingOutputEvent(requestEventWithAddressType, rankings)
+      const rankingTags = getRankingTags(output, 'a')
+
+      expect(rankingTags).toHaveLength(1)
+      expect(rankingTags[0][1]).toBe(validCoordinate)
+    })
+
+    test('best-effort coerces event:a actor ids to canonical a output tags', () => {
+      const requestEventWithAddressType: NostrEvent = {
+        ...mockRequestEvent,
+        tags: [
+          ['config', 'type', 'a'],
+          ['config', 'pov', '"naddr1test"'],
+        ],
+      }
+
+      const rankings: [string, { rank?: number; confidence?: number }][] = [
+        [`event:a:30023:${validPubkey.toUpperCase()}:demo-note`, { rank: 0.8, confidence: 0.7 }],
+      ]
+
+      const output = generateRankingOutputEvent(requestEventWithAddressType, rankings)
+      const rankingTags = getRankingTags(output, 'a')
+
+      expect(rankingTags).toHaveLength(1)
+      expect(rankingTags[0][1]).toBe(`30023:${validPubkey}:demo-note`)
+    })
+
     test('should handle undefined rank and confidence with defaults', () => {
       const rankings: [string, { rank?: number; confidence?: number }][] = [
-        ['subject1', {}]
+        [validPubkey, {}]
       ]
 
       const output = generateRankingOutputEvent(
@@ -161,7 +307,7 @@ describe('TSM Output Generators', () => {
         rankings
       )
 
-      const rankingTag = output.tags.find((tag: string[]) => tag[0] === 'p' && tag[1] === 'subject1')
+      const rankingTag = output.tags.find((tag: string[]) => tag[0] === 'p' && tag[1] === validPubkey)
       expect(rankingTag).toBeDefined()
       expect(rankingTag![2]).toBe('0.000000')
       expect(rankingTag![3]).toBe('0.0000')
@@ -169,7 +315,7 @@ describe('TSM Output Generators', () => {
 
     test('should include pagination info when provided', () => {
       const rankings: [string, { rank?: number; confidence?: number }][] = [
-        ['subject1', { rank: 0.95, confidence: 0.85 }]
+        [validPubkey, { rank: 0.95, confidence: 0.85 }]
       ]
 
       const output = generateRankingOutputEvent(
@@ -205,7 +351,7 @@ describe('TSM Output Generators', () => {
 
     test('should omit optional pagination fields when not provided', () => {
       const rankings: [string, { rank?: number; confidence?: number }][] = [
-        ['subject1', { rank: 0.95, confidence: 0.85 }]
+        [validPubkey, { rank: 0.95, confidence: 0.85 }]
       ]
 
       const output = generateRankingOutputEvent(
@@ -224,9 +370,9 @@ describe('TSM Output Generators', () => {
 
     test('should handle multiple rankings with correct indices', () => {
       const rankings: [string, { rank?: number; confidence?: number }][] = [
-        ['subject1', { rank: 0.95, confidence: 0.85 }],
-        ['subject2', { rank: 0.80, confidence: 0.75 }],
-        ['subject3', { rank: 0.65, confidence: 0.60 }]
+        [validPubkey, { rank: 0.95, confidence: 0.85 }],
+        [validPubkey2, { rank: 0.80, confidence: 0.75 }],
+        [validPubkey3, { rank: 0.65, confidence: 0.60 }]
       ]
 
       const output = generateRankingOutputEvent(
@@ -236,9 +382,9 @@ describe('TSM Output Generators', () => {
 
       const rankingTags = getRankingTags(output)
       expect(rankingTags).toHaveLength(3)
-      expect(rankingTags[0][1]).toBe('subject1')
-      expect(rankingTags[1][1]).toBe('subject2')
-      expect(rankingTags[2][1]).toBe('subject3')
+      expect(rankingTags[0][1]).toBe(validPubkey)
+      expect(rankingTags[1][1]).toBe(validPubkey2)
+      expect(rankingTags[2][1]).toBe(validPubkey3)
     })
 
     test('should handle empty rankings array', () => {

@@ -2,7 +2,7 @@ import { NostrEvent } from '../lib/nostr-tools'
 import { InteractionsMap, InteractionData, actorId, subjectId } from "../graperank/types"
 import { NostrInterpreterClass } from "./classes"
 import { NostrInterpreterParams, NostrType } from './types'
-import { getEventActor, getEventSubject, isEventType, validatePubkey } from './helpers'
+import { getEventActor, getEventSubject, isEventType, isPubkeyType, validatePubkey } from './helpers'
 
 function getFirstTagValue(event: NostrEvent, tagName: string): string | undefined {
   const found = event.tags.find((t) => t[0] === tagName)
@@ -78,6 +78,15 @@ function resolveZapSenderPubkey(zapReceipt: NostrEvent): string | undefined {
   return senderFromReceiptTag || senderFromRequestDescription
 }
 
+function shouldSkipEventActorSubjectFallback(
+  povType: NostrType | undefined,
+  requireBoundActors: boolean,
+): boolean {
+  // In event-actor mode with pubkey-like outputs, unresolved bound actor ids are
+  // internal `event:*` references and must not leak into ranking subjects.
+  return requireBoundActors && !!povType && isPubkeyType(povType)
+}
+
 function getEventActorResolvedSubjects(
   instance: NostrInterpreterClass<NostrInterpreterParams>,
   dos: number,
@@ -111,6 +120,15 @@ function getEventActorResolvedSubjects(
     if (resolvedSubjects.size) {
       return [...resolvedSubjects]
     }
+  }
+
+  const skipBoundActorFallback = shouldSkipEventActorSubjectFallback(
+    povActorContext?.povType,
+    requireBoundActors,
+  )
+
+  if (skipBoundActorFallback && boundEventActors.length) {
+    return []
   }
 
   if (boundEventActors.length) {

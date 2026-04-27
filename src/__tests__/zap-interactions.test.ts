@@ -128,6 +128,66 @@ describe('applyZapInteractions', () => {
     })
   })
 
+  test('skips unresolved event-actor subjects for pubkey output mode', async () => {
+    const sender = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const recipient = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    const referencedEventId = '6666666666666666666666666666666666666666666666666666666666666666'
+    const zapReceipt = buildZapReceiptEvent(sender, recipient, referencedEventId)
+
+    const eventActorId = buildEventActorId({ referenceType: 'e', value: referencedEventId, relayHints: [] })
+    expect(eventActorId).toBeDefined()
+
+    const interpreter = buildZapInterpreter('P', 'e')
+    interpreter.fetched = [new Set([zapReceipt])]
+    interpreter.setPovActorContext({
+      actorMode: 'event',
+      povType: 'pubkey',
+      rankedPov: [[eventActorId!]],
+      eventActorReferenceMap: new Map([[eventActorId!, { referenceType: 'e', value: referencedEventId, relayHints: [] }]]),
+    })
+
+    ;(interpreter as any).eventActorBindingsByDos = [
+      new Map([[zapReceipt.id, new Set([eventActorId!])]]),
+    ]
+
+    const interactions = await applyZapInteractions(interpreter, 1)
+
+    expect(interactions?.size).toBe(0)
+  })
+
+  test('keeps unresolved bound event-actor fallback for non-pubkey output mode', async () => {
+    const sender = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const recipient = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    const referencedEventId = '7777777777777777777777777777777777777777777777777777777777777777'
+    const zapReceipt = buildZapReceiptEvent(sender, recipient, referencedEventId)
+
+    const eventActorId = buildEventActorId({ referenceType: 'e', value: referencedEventId, relayHints: [] })
+    expect(eventActorId).toBeDefined()
+
+    const interpreter = buildZapInterpreter('P', 'e')
+    interpreter.fetched = [new Set([zapReceipt])]
+    interpreter.setPovActorContext({
+      actorMode: 'event',
+      povType: 'kind',
+      rankedPov: [[eventActorId!]],
+      eventActorReferenceMap: new Map([[eventActorId!, { referenceType: 'e', value: referencedEventId, relayHints: [] }]]),
+    })
+
+    ;(interpreter as any).eventActorBindingsByDos = [
+      new Map([[zapReceipt.id, new Set([eventActorId!])]]),
+    ]
+
+    const interactions = await applyZapInteractions(interpreter, 1)
+    const actorInteractions = interactions?.get(sender)
+
+    expect(actorInteractions).toBeDefined()
+    expect(actorInteractions?.get(eventActorId!)).toEqual({
+      confidence: 0.5,
+      value: 1,
+      dos: 1,
+    })
+  })
+
   test('falls back to embedded zap request pubkey when sender tag is missing', async () => {
     const sender = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     const recipient = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
