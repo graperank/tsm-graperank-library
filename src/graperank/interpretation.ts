@@ -1,4 +1,4 @@
-import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput, InterpreterFetchProgress, InterpreterFetchProgressCallback } from "./types"
+import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput, InterpreterFetchProgress, InterpreterFetchProgressCallback, FinalizedInterpreterInteractions } from "./types"
 import type { Interpreter, InterpreterInitializer, InterpreterParams } from "./types"
 import type { PovActorContext } from './nostr-types'
 import { deriveActorIdsFromRankedPov, normalizePov } from "../nostr-interpreters/helpers"
@@ -21,6 +21,12 @@ export class InterpretationController {
   }
   async interpret(input : InterpretationInput) : Promise<InterpretationOutput | undefined>{
     const { type, pov, requests } = input
+    const requestIndexesByInterpreterId = new Map<InterpreterId<any>, number>()
+    requests?.forEach((request, index) => {
+      if (!requestIndexesByInterpreterId.has(request.id)) {
+        requestIndexesByInterpreterId.set(request.id, index)
+      }
+    })
     let actors : Set<actorId> | undefined
     var outputResponses : InterpreterResponse[] = []
     var outputInteractions : InteractionsList = []
@@ -204,6 +210,15 @@ export class InterpretationController {
         // add the final map of currentInteractions to interactions list
         addToInteractionsList(request.id, requestindex, currentInteractions, outputInteractions)
       }
+
+      if (povActorContext?.actorMode === 'event') {
+        const finalizedInterpreterInteractions = await this.interpreters.finalizePending(outputInteractions)
+        finalizedInterpreterInteractions.forEach(({ interpreterId, interactions }) => {
+          const requestIndex = requestIndexesByInterpreterId.get(interpreterId) || 0
+          addToInteractionsList(interpreterId, requestIndex, interactions, outputInteractions)
+        })
+      }
+
       // // DEBUG duplicate ratings
       // let numtargetratings : Map<actorId,number> = new Map()
       // await forEachBigArray(interactions,(interaction)=>{
@@ -256,6 +271,20 @@ function addToInteractionsList(interpreterId : InterpreterId<any>, index : numbe
         subject,
         ...interactionData
       })
+    })
+  })
+}
+
+function mergeInteractionsMap(target: InteractionsMap, source: InteractionsMap): void {
+  source.forEach((sourceSubjects, actor) => {
+    let targetSubjects = target.get(actor)
+    if (!targetSubjects) {
+      targetSubjects = new Map()
+      target.set(actor, targetSubjects)
+    }
+
+    sourceSubjects.forEach((interactionData, subject) => {
+      targetSubjects!.set(subject, interactionData)
     })
   })
 }
@@ -334,6 +363,30 @@ export class InterpretersMap extends Map<InterpreterId<any>, Interpreter<Interpr
     let instance = this.get(interpreter)
     let result = await instance?.interpret(dos)
     return result
+  }
+
+  async finalizePending(interactions: InteractionsList): Promise<FinalizedInterpreterInteractions[]> {
+    const finalizedInteractions: FinalizedInterpreterInteractions[] = []
+
+    // Run interpreter-specific finalizers after interpretation has produced
+    // a shared interactions list that finalizers can inspect/project onto.
+    for (const [interpreterId, interpreter] of this.entries()) {
+      if (!interpreter.needsFinalization || !interpreter.finalize) {
+        continue
+      }
+
+      const finalized = await interpreter.finalize(interactions)
+      if (!finalized || finalized.size === 0) {
+        continue
+      }
+
+      // Persist finalized projections into the interpreter map so downstream
+      // consumers of `interpreter.interactions` see a complete view.
+      mergeInteractionsMap(interpreter.interactions, finalized)
+      finalizedInteractions.push({ interpreterId, interactions: finalized })
+    }
+
+    return finalizedInteractions
   }
 
 }

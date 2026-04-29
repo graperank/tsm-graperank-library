@@ -1,5 +1,5 @@
 import { NostrEvent, NostrFilter, npubEncode, decode, SimplePool, useWebSocketImplementation } from '../lib/nostr-tools'
-import { RankedPov, subjectId, Interpreter, InterpreterRequest, InteractionsMap, actorId, InterpreterInitializer, InterpreterParams, InterpreterId, InteractionData, povType, InterpreterFetchProgress, InterpreterFetchProgressCallback } from "../graperank/types"
+import { RankedPov, subjectId, Interpreter, InterpreterRequest, InteractionsMap, actorId, InterpreterInitializer, InterpreterParams, InterpreterId, InteractionData, povType, InterpreterFetchProgress, InterpreterFetchProgressCallback, InteractionsList } from "../graperank/types"
 import { EventActorReference, EventActorBindings, PovActorContext } from '../graperank/nostr-types'
 import { EventReferenceTarget, EventReferenceTypes, NostrEventField, NostrEventFields, NostrInterpreterClassConfig, NostrInterpreterId, NostrInterpreterKeys, NostrInterpreterParams, NostrType } from "./types"
 import { applyInteractionsByTag } from "./callbacks"
@@ -40,7 +40,7 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   }
 
 
-  // Nostr interpreters are identified by kinmd number and tag type
+  // Nostr interpreters are identified by kind number and tag type
   readonly interpreterId: NostrInterpreterId
   // labels and descriptions for improved user experiences 
   readonly label: string
@@ -57,9 +57,13 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   
   fetched : Set<NostrEvent>[] = []
   interactions : InteractionsMap = new Map()
+  needsFinalization = false
   private povActorContext?: PovActorContext
   private eventActorBindingsByDos: EventActorBindings[] = []
   interpret : (dos? : number) => Promise<InteractionsMap | undefined>
+  // Optional interpreter-specific post-processing hook.
+  // Concrete interpreters decide when this should be enabled.
+  finalize? : (interactions: InteractionsList) => Promise<InteractionsMap | undefined>
   validate? : 
   (events : Set<NostrEvent>, authors : actorId[], previous? : Set<NostrEvent>) 
   => boolean | actorId[]
@@ -115,6 +119,14 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
       console.log("GrapeRank : ",this.request?.id," interpreter : merged iteration ",dos," into total interpreted : ", numInteractionsMerged ," new interactions and ",numInteractionsDuplicate," duplicate interactions from ",newInteractions.size," authors")
 
       return result
+    }
+
+    if (config.finalize) {
+      // Keep class-level finalization generic by delegating implementation
+      // details to the interpreter factory configuration.
+      this.finalize = async (interactions: InteractionsList) => {
+        return await config.finalize!(this, interactions)
+      }
     }
   }
 
@@ -468,6 +480,9 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   setPovActorContext(context?: PovActorContext): void {
     this.povActorContext = context
     this.eventActorBindingsByDos = []
+    // A new POV context starts a new interpretation lifecycle.
+    // Any pending finalization state from previous context is invalid.
+    this.needsFinalization = false
   }
 
   getEventActorBindings(dos: number): EventActorBindings | undefined {
@@ -513,6 +528,14 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
           const rootEvents = await this.fetchEventsWithRetry(filter, relays)
           const sourceEvents = await this.resolvePaginatedAddressableEvents(rootEvents, kind, pubkey, relays)
           const sourceHasReferenceTags = hasEventReferenceTags(sourceEvents)
+          // use EventActor mode ...
+          // if requested `pov` value is a naddr,
+          // and if resolved pov event(s) have event reference tags,
+          // and if requested `type` value is NOT an event reference type,
+          // and if resolved pov event(s) do NOT have tags of the requested `type`,
+          // then requested `type` should be assumed to refer to 
+          // a tag within the event(s) referenced by the resolved pov event(s).
+          // This will be the reference resolved pov value.
           const shouldUseEventActors = !isEventType(requestedType) && sourceHasReferenceTags
 
           if (shouldUseEventActors) {

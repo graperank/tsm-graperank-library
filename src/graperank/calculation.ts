@@ -172,7 +172,7 @@ export class CalculationController {
     })
     // sort first : ranknigs with higher ranks and most interactions
     return rankings.sort((a ,b )=>{
-      return  a[1].rank - b[1].rank 
+      return (b[1].rank ?? 0) - (a[1].rank ?? 0)
     })
   }
 

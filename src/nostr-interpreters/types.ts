@@ -1,5 +1,5 @@
 import { NostrEvent } from "../lib/nostr-tools"
-import { InterpreterParams, Interpreter, InterpreterId, InteractionsMap, actorId, InterpreterInitializer } from "../graperank/types"
+import { InterpreterParams, Interpreter, InterpreterId, InteractionsMap, actorId, InterpreterInitializer, InteractionsList } from "../graperank/types"
 import { NostrInterpreterClass } from "./classes"
 
 export const NostrEventFields = ['id', 'pubkey', 'kind'] as const
@@ -77,6 +77,11 @@ export type NostrInterpreterClassConfig<ParamsType extends NostrInterpreterParam
   defaultParams : ParamsType,
   interpret? : 
     (instance : NostrInterpreterClass<ParamsType>, dos : number) 
+    => Promise<InteractionsMap | undefined>,
+  // Optional post-interpret pass for interpreter-specific projections.
+  // The controller invokes this only when `needsFinalization` is true.
+  finalize? :
+    (instance : NostrInterpreterClass<ParamsType>, interactions: InteractionsList)
     => Promise<InteractionsMap | undefined>,
   validate? : 
     (events : Set<NostrEvent>, authors : actorId[], previous? : Set<NostrEvent>) 

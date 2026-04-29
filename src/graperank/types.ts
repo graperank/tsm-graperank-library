@@ -110,6 +110,11 @@ export type InteractionsList = Interaction[]
 
 export type InteractionsMap = Map<actorId, Map<subjectId, InteractionData>>
 
+export type FinalizedInterpreterInteractions = {
+  interpreterId: InterpreterId<any>
+  interactions: InteractionsMap
+}
+
 export type InterpretationInput = {
   type : povType,
   pov : RankedPov | UnrankedPov,
@@ -149,6 +154,8 @@ export interface Interpreter<ParamsType extends InterpreterParams> {
   label: string
   description: string
   request?: InterpreterRequest<ParamsType>
+  // Set by an interpreter when a post-interpret projection pass is pending.
+  needsFinalization?: boolean
   params: ParamsType // default parameters
   readonly fetched: Set<any>[]
   readonly interactions: InteractionsMap
@@ -171,6 +178,9 @@ export interface Interpreter<ParamsType extends InterpreterParams> {
   ): Promise<number>
   // interpret() interprets the fetched data
   interpret(this: Interpreter<ParamsType>, fetchedIndex?: number): Promise<InteractionsMap | undefined>
+  // finalize() runs after interpreter iterations complete when `needsFinalization` is true.
+  // It can project additional interactions using already interpreted output context.
+  finalize?(interactions: InteractionsList): Promise<InteractionsMap | undefined>
 }
 
 // export type InterpretResult = {

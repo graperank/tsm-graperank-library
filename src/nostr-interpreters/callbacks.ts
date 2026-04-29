@@ -1,8 +1,18 @@
 import { NostrEvent } from '../lib/nostr-tools'
-import { InteractionsMap, InteractionData, actorId, subjectId } from "../graperank/types"
+import { InteractionsMap, InteractionData, InteractionsList, actorId, subjectId } from "../graperank/types"
 import { NostrInterpreterClass } from "./classes"
 import { NostrInterpreterParams, NostrType } from './types'
-import { getEventActor, getEventSubject, isEventType, isPubkeyType, validatePubkey } from './helpers'
+import { getEventActor, getEventSubject, validatePubkey } from './helpers'
+
+type ZapTotalsByActorSubject = Map<actorId, Map<subjectId, number>>
+type ZapEventActorSenderTotals = ZapTotalsByActorSubject
+type ZapEventActorSenderTotalsByDos = Map<number, ZapEventActorSenderTotals>
+
+type ApplyZapInteractionsOptions = {
+  // Optional hook used by interpreter factories to keep staged finalization
+  // state outside `NostrInterpreterClass`.
+  stageEventActorSenderTotals?: (dos: number, totalsByEventActor: ZapEventActorSenderTotals) => void
+}
 
 function getFirstTagValue(event: NostrEvent, tagName: string): string | undefined {
   const found = event.tags.find((t) => t[0] === tagName)
@@ -63,80 +73,266 @@ function getZapRequestPubkeyFromDescription(zapReceipt: NostrEvent): string | un
   }
 }
 
-function resolveZapSenderPubkey(zapReceipt: NostrEvent): string | undefined {
-  const senderFromReceiptTag = getEventSubject('P', zapReceipt)
-  const senderFromRequestDescription = getZapRequestPubkeyFromDescription(zapReceipt)
+type ZapPairMode =
+  | 'event-forward'
+  | 'event-reverse'
+  | 'pubkey-forward'
+  | 'pubkey-reverse'
 
-  if (
-    senderFromReceiptTag &&
-    senderFromRequestDescription &&
-    senderFromReceiptTag !== senderFromRequestDescription
-  ) {
-    return undefined
+function resolveZapPairMode(actorType: NostrType, subjectType: NostrType): ZapPairMode | undefined {
+  if (actorType === 'e' && subjectType === 'pubkey') {
+    return 'event-forward'
   }
 
-  return senderFromReceiptTag || senderFromRequestDescription
+  if (actorType === 'pubkey' && subjectType === 'e') {
+    return 'event-reverse'
+  }
+
+  if (actorType === 'p' && subjectType === 'pubkey') {
+    return 'pubkey-forward'
+  }
+
+  if (actorType === 'pubkey' && subjectType === 'p') {
+    return 'pubkey-reverse'
+  }
+
+  return undefined
 }
 
-function shouldSkipEventActorSubjectFallback(
-  povType: NostrType | undefined,
-  requireBoundActors: boolean,
+function resolveZapSenderPubkey(zapReceipt: NostrEvent): string | undefined {
+  return getZapRequestPubkeyFromDescription(zapReceipt)
+}
+
+function parseZapAmountMsats(zapReceipt: NostrEvent): number {
+  const amountTag = zapReceipt.tags.find((tag) => tag[0] === 'amount')
+  if (!amountTag || !amountTag[1]) {
+    return 0
+  }
+
+  const parsedAmount = parseInt(amountTag[1], 10)
+  return Number.isFinite(parsedAmount) ? parsedAmount : 0
+}
+
+export function resolveZapInteractionValue(params: NostrInterpreterParams, zapAmountMsats: number): number {
+  // Zap weights are configured through numeric params where keys like
+  // `<1000` / `>10000000` define threshold buckets in msats.
+  const defaultValue = params.value as number || 0
+  if (!Number.isFinite(zapAmountMsats)) {
+    return defaultValue
+  }
+
+  const lessThanParams: Array<{ threshold: number; value: number }> = []
+  const greaterThanParams: Array<{ threshold: number; value: number }> = []
+
+  for (const [key, paramValue] of Object.entries(params)) {
+    if (typeof paramValue !== 'number') continue
+
+    if (key.startsWith('<')) {
+      const threshold = parseInt(key.substring(1), 10)
+      if (!isNaN(threshold)) {
+        lessThanParams.push({ threshold, value: paramValue })
+      }
+    } else if (key.startsWith('>')) {
+      const threshold = parseInt(key.substring(1), 10)
+      if (!isNaN(threshold)) {
+        greaterThanParams.push({ threshold, value: paramValue })
+      }
+    }
+  }
+
+  lessThanParams.sort((a, b) => b.threshold - a.threshold)
+  greaterThanParams.sort((a, b) => a.threshold - b.threshold)
+
+  for (const thresholdParam of lessThanParams) {
+    if (zapAmountMsats < thresholdParam.threshold) {
+      return thresholdParam.value
+    }
+  }
+
+  for (const thresholdParam of greaterThanParams) {
+    if (zapAmountMsats > thresholdParam.threshold) {
+      return thresholdParam.value
+    }
+  }
+
+  return defaultValue
+}
+
+function addZapAmount(
+  totalsByActor: Map<actorId, Map<subjectId, number>>,
+  actor: actorId,
+  subject: subjectId,
+  zapAmountMsats: number,
 ): boolean {
-  // In event-actor mode with pubkey-like outputs, unresolved bound actor ids are
-  // internal `event:*` references and must not leak into ranking subjects.
-  return requireBoundActors && !!povType && isPubkeyType(povType)
+  let actorTotals = totalsByActor.get(actor)
+  if (!actorTotals) {
+    actorTotals = new Map()
+    totalsByActor.set(actor, actorTotals)
+  }
+
+  const previousTotal = actorTotals.get(subject) || 0
+  actorTotals.set(subject, previousTotal + zapAmountMsats)
+  return previousTotal > 0
 }
 
-function getEventActorResolvedSubjects(
+function buildInteractionsFromZapTotals(
+  instance: NostrInterpreterClass<NostrInterpreterParams>,
+  dos: number,
+  totalsByActor: ZapTotalsByActorSubject,
+  resolveValue: (totalMsats: number) => number,
+): InteractionsMap {
+  const confidence = instance.params.confidence as number || .5
+  const interactions: InteractionsMap = new Map()
+
+  totalsByActor.forEach((subjectTotals, actor) => {
+    const actorInteractions = new Map<subjectId, InteractionData>()
+
+    subjectTotals.forEach((totalMsats, subject) => {
+      actorInteractions.set(subject, {
+        confidence,
+        value: resolveValue(totalMsats),
+        dos,
+      })
+    })
+
+    if (actorInteractions.size) {
+      interactions.set(actor, actorInteractions)
+    }
+  })
+
+  return interactions
+}
+
+function getEventActorResolvedPubkeys(
   instance: NostrInterpreterClass<NostrInterpreterParams>,
   dos: number,
   zapReceipt: NostrEvent,
-  subjectType: NostrType,
-): subjectId[] {
-  const povActorContext = instance.getPovActorContext()
-  const requireBoundActors = povActorContext?.actorMode === 'event'
-  const boundEventActors = getActorsForEvent(instance, dos, zapReceipt, subjectType, { requireBoundActors })
-
-  if (requireBoundActors && boundEventActors.length === 0) {
-    return []
+): {
+  eventActorIds: actorId[]
+  eventAuthorPubkeys: subjectId[]
+} {
+  const eventActorIds = getActorsForEvent(instance, dos, zapReceipt, 'e', { requireBoundActors: true })
+  if (!eventActorIds.length) {
+    return { eventActorIds: [], eventAuthorPubkeys: [] }
   }
 
-  const resolvedTypeValues = povActorContext?.eventActorResolvedTypeValues
-  if (boundEventActors.length && resolvedTypeValues?.size) {
-    const resolvedSubjects = new Set<subjectId>()
-    for (const boundEventActor of boundEventActors) {
-      const resolvedValue = resolvedTypeValues.get(boundEventActor)
-      if (!resolvedValue) continue
+  const resolvedTypeValues = instance.getPovActorContext()?.eventActorResolvedTypeValues
+  if (!resolvedTypeValues?.size) {
+    return { eventActorIds, eventAuthorPubkeys: [] }
+  }
 
-      if (Array.isArray(resolvedValue)) {
-        for (const value of resolvedValue) {
-          resolvedSubjects.add(value)
-        }
-      } else {
-        resolvedSubjects.add(resolvedValue)
+  const eventAuthorPubkeys = new Set<subjectId>()
+  for (const eventActorId of eventActorIds) {
+    const resolvedValue = resolvedTypeValues.get(eventActorId)
+    if (!resolvedValue) continue
+
+    const candidates = Array.isArray(resolvedValue) ? resolvedValue : [resolvedValue]
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string' || !validatePubkey(candidate)) continue
+      eventAuthorPubkeys.add(candidate)
+    }
+  }
+
+  return {
+    eventActorIds,
+    eventAuthorPubkeys: [...eventAuthorPubkeys],
+  }
+}
+
+export async function finalizeZapEventActorProjection(
+  instance: NostrInterpreterClass<NostrInterpreterParams>,
+  interactions: InteractionsList,
+  pendingByDos: ZapEventActorSenderTotalsByDos,
+): Promise<InteractionsMap | undefined> {
+  // Finalization is one-shot per request execution. Consume staged totals
+  // before projecting so repeated finalize calls are naturally idempotent.
+  const pendingEntries = [...pendingByDos.entries()]
+  pendingByDos.clear()
+  instance.needsFinalization = false
+
+  if (!pendingEntries.length) {
+    return undefined
+  }
+
+  const resolvedTypeValues = instance.getPovActorContext()?.eventActorResolvedTypeValues
+  if (!resolvedTypeValues?.size) {
+    return undefined
+  }
+
+  const existingSubjects = new Set<subjectId>()
+  for (const interaction of interactions) {
+    existingSubjects.add(interaction.subject)
+  }
+
+  // Only emit projections onto subjects that already exist in the request's
+  // interpreted graph, keeping event-actor projection bounded to prior outputs.
+  if (!existingSubjects.size) {
+    return undefined
+  }
+
+  const mergedSenderTotalsByEventActor: ZapEventActorSenderTotals = new Map()
+  pendingEntries.forEach(([, totalsByEventActor]) => {
+    totalsByEventActor.forEach((senderTotals, eventActorId) => {
+      let mergedSenderTotals = mergedSenderTotalsByEventActor.get(eventActorId)
+      if (!mergedSenderTotals) {
+        mergedSenderTotals = new Map()
+        mergedSenderTotalsByEventActor.set(eventActorId, mergedSenderTotals)
       }
+
+      senderTotals.forEach((msats, senderPubkey) => {
+        const priorTotal = mergedSenderTotals!.get(senderPubkey) || 0
+        mergedSenderTotals!.set(senderPubkey, priorTotal + msats)
+      })
+    })
+  })
+
+  if (!mergedSenderTotalsByEventActor.size) {
+    return undefined
+  }
+
+  const finalizedInteractions: InteractionsMap = new Map()
+  const confidence = instance.params.confidence as number || .5
+  const dosValues = pendingEntries.map(([dos]) => dos)
+  const finalizedDos = dosValues.length ? Math.max(...dosValues) : undefined
+
+  mergedSenderTotalsByEventActor.forEach((senderTotals, eventActorId) => {
+    if (!senderTotals.size) return
+
+    const resolvedValue = resolvedTypeValues.get(eventActorId)
+    if (!resolvedValue) return
+
+    const resolvedSubjects = (Array.isArray(resolvedValue) ? resolvedValue : [resolvedValue]).filter(
+      (candidate): candidate is string => typeof candidate === 'string' && validatePubkey(candidate),
+    )
+    if (!resolvedSubjects.length) return
+
+    let projectedValue = 0
+    senderTotals.forEach((msats) => {
+      projectedValue += resolveZapInteractionValue(instance.params, msats)
+    })
+
+    let actorInteractions = finalizedInteractions.get(eventActorId)
+    if (!actorInteractions) {
+      actorInteractions = new Map()
+      finalizedInteractions.set(eventActorId, actorInteractions)
     }
 
-    if (resolvedSubjects.size) {
-      return [...resolvedSubjects]
+    resolvedSubjects.forEach((resolvedSubject) => {
+      if (!existingSubjects.has(resolvedSubject)) return
+
+      actorInteractions!.set(resolvedSubject, {
+        confidence,
+        value: projectedValue,
+        dos: finalizedDos,
+      })
+    })
+
+    if (!actorInteractions.size) {
+      finalizedInteractions.delete(eventActorId)
     }
-  }
+  })
 
-  const skipBoundActorFallback = shouldSkipEventActorSubjectFallback(
-    povActorContext?.povType,
-    requireBoundActors,
-  )
-
-  if (skipBoundActorFallback && boundEventActors.length) {
-    return []
-  }
-
-  if (boundEventActors.length) {
-    return boundEventActors
-  }
-
-  const fallbackSubject = getEventSubject(subjectType, zapReceipt)
-  return fallbackSubject ? [fallbackSubject] : []
+  return finalizedInteractions.size ? finalizedInteractions : undefined
 }
 
 // A generic callback for interpreting interactions from individual tags
@@ -272,7 +468,11 @@ export function getEventsAuthors(events: Set<NostrEvent>, exclude? : actorId[]) 
 // Accepts `<` and `>` prefixed interpreter params (eg: <1000) 
 // allowing requestors to specify interaction values 
 // based on zap amount.
-export async function applyZapInteractions(instance : NostrInterpreterClass<NostrInterpreterParams>, dos : number) : Promise<InteractionsMap | undefined> {
+export async function applyZapInteractions(
+  instance : NostrInterpreterClass<NostrInterpreterParams>,
+  dos : number,
+  options?: ApplyZapInteractionsOptions,
+) : Promise<InteractionsMap | undefined> {
   console.log("GrapeRank : nostr interpreter : applyZapInteractions()")
   const actorType = instance.params.actorType
   if(!actorType || !instance.allowedActorTypes.includes(actorType)) 
@@ -281,11 +481,22 @@ export async function applyZapInteractions(instance : NostrInterpreterClass<Nost
   if(!subjectType || !instance.allowedSubjectTypes.includes(subjectType)) 
     return undefined
 
-  const eventActorMode = instance.getPovActorContext()?.actorMode === 'event'
-  const isEventActorPair = (actorType === 'P' && isEventType(subjectType)) || (isEventType(actorType) && subjectType === 'P')
-  if (eventActorMode && !isEventActorPair) {
+  const pairMode = resolveZapPairMode(actorType, subjectType)
+  if (!pairMode) {
     console.log(
-      "GrapeRank : nostr interpreter : applyZapInteractions : skipped unsupported event-actor pair actorType=",
+      "GrapeRank : nostr interpreter : applyZapInteractions : skipped unsupported pair actorType=",
+      actorType,
+      "subjectType=",
+      subjectType,
+    )
+    return new Map()
+  }
+
+  const eventActorMode = instance.getPovActorContext()?.actorMode === 'event'
+  const resolveValue = (totalMsats: number) => resolveZapInteractionValue(instance.params, totalMsats)
+  if ((pairMode === 'event-forward' || pairMode === 'event-reverse') && !eventActorMode) {
+    console.log(
+      "GrapeRank : nostr interpreter : applyZapInteractions : skipped event-directional pair outside event mode actorType=",
       actorType,
       "subjectType=",
       subjectType,
@@ -295,18 +506,13 @@ export async function applyZapInteractions(instance : NostrInterpreterClass<Nost
   
   let fetchedIndex = dos - 1
   const fetchedSet = instance.fetched[fetchedIndex]
-  const newInteractionsMap : InteractionsMap = new Map()
+  const zapTotalsByActorSubject: ZapTotalsByActorSubject = new Map()
+  const eventActorSenderTotals: ZapEventActorSenderTotals = new Map()
   let totalInteractions : number = 0
-  let duplicateInteractions : number = 0
+  let aggregatedInteractions : number = 0
   let skippedInvalid : number = 0
-  const defaultValue = instance.params.value as number || 0
-  const confidence = instance.params.confidence as number || .5
 
   for(let zapReceipt of fetchedSet) {
-    // Per NIP-57: zap receipt pubkey is the lightning server, not the sender or recipient
-    // Sender is in uppercase 'P' tag (fallback: embedded zap request pubkey in description),
-    // recipient is in lowercase 'p' tag.
-    
     const sender = resolveZapSenderPubkey(zapReceipt)
     if(!sender) {
       skippedInvalid++
@@ -314,116 +520,64 @@ export async function applyZapInteractions(instance : NostrInterpreterClass<Nost
     }
 
     const recipient = getEventSubject('p', zapReceipt)
-    const requiresRecipient = actorType === 'p' || subjectType === 'p'
-    if(requiresRecipient && !recipient) {
+    if ((pairMode === 'pubkey-forward' || pairMode === 'pubkey-reverse') && !recipient) {
       skippedInvalid++
       continue
     }
 
-    let zapActors: actorId[] = []
-    let zapSubjects: subjectId[] = []
+    const zapAmountMsats = parseZapAmountMsats(zapReceipt)
+    let actors: actorId[] = []
+    let subjects: subjectId[] = []
 
-    if (actorType === 'P' && isEventType(subjectType)) {
-      zapActors = [sender]
-      zapSubjects = getEventActorResolvedSubjects(instance, dos, zapReceipt, subjectType)
-    } else if (isEventType(actorType) && subjectType === 'P') {
-      zapActors = getActorsForEvent(instance, dos, zapReceipt, actorType, { requireBoundActors: eventActorMode })
-      zapSubjects = [sender]
+    if (pairMode === 'event-forward' || pairMode === 'event-reverse') {
+      const { eventActorIds, eventAuthorPubkeys } = getEventActorResolvedPubkeys(instance, dos, zapReceipt)
+      if (!eventActorIds.length || !eventAuthorPubkeys.length) {
+        skippedInvalid++
+        continue
+      }
+
+      if (pairMode === 'event-forward') {
+        actors = [sender]
+        subjects = eventAuthorPubkeys
+        eventActorIds.forEach((eventActorId) => {
+          addZapAmount(eventActorSenderTotals, eventActorId, sender, zapAmountMsats)
+        })
+      } else {
+        actors = eventAuthorPubkeys
+        subjects = [sender]
+      }
+    } else if (pairMode === 'pubkey-forward') {
+      actors = [sender]
+      subjects = recipient ? [recipient] : []
     } else {
-      const subject = subjectType === 'P'
-        ? sender
-        : subjectType === 'p'
-          ? recipient
-          : getEventSubject(subjectType, zapReceipt)
-      if(subject) {
-        zapSubjects = [subject]
-      }
-
-      zapActors = isEventType(actorType)
-        ? getActorsForEvent(instance, dos, zapReceipt, actorType, { requireBoundActors: eventActorMode })
-        : actorType === 'P'
-          ? [sender]
-          : recipient
-            ? [recipient]
-            : []
+      actors = recipient ? [recipient] : []
+      subjects = [sender]
     }
 
-    if(!zapActors.length || !zapSubjects.length) {
+    if(!actors.length || !subjects.length) {
       skippedInvalid++
       continue
     }
-    
-    // Extract zap amount in millisatoshi
-    let zapAmount: number | undefined
-    const amountTag = zapReceipt.tags.find(tag => tag[0] === 'amount')
-    if(amountTag && amountTag[1]) {
-      zapAmount = parseInt(amountTag[1])
-    }
-    
-    // Calculate value based on zap amount and params
-    let value = defaultValue
-    if(zapAmount !== undefined && !isNaN(zapAmount)) {
-      // Collect and sort comparison-based params
-      const lessThanParams: Array<{threshold: number, value: number}> = []
-      const greaterThanParams: Array<{threshold: number, value: number}> = []
-      
-      for(const [key, paramValue] of Object.entries(instance.params)) {
-        if(typeof paramValue !== 'number') continue
-        
-        if(key.startsWith('<')) {
-          const threshold = parseInt(key.substring(1))
-          if(!isNaN(threshold)) {
-            lessThanParams.push({threshold, value: paramValue})
-          }
-        } else if(key.startsWith('>')) {
-          const threshold = parseInt(key.substring(1))
-          if(!isNaN(threshold)) {
-            greaterThanParams.push({threshold, value: paramValue})
-          }
-        }
-      }
-      
-      // Sort < in descending order, > in ascending order
-      lessThanParams.sort((a, b) => b.threshold - a.threshold)
-      greaterThanParams.sort((a, b) => a.threshold - b.threshold)
-      
-      // Check < params first, then > params
-      for(const param of lessThanParams) {
-        if(zapAmount < param.threshold) {
-          value = param.value
-          break
-        }
-      }
-      if(value === defaultValue) {
-        for(const param of greaterThanParams) {
-          if(zapAmount > param.threshold) {
-            value = param.value
-            break
-          }
-        }
-      }
-    }
-    
-    for(const zapActor of zapActors) {
-      let actorInteractions = newInteractionsMap.get(zapActor)
-      if(!actorInteractions) {
-        actorInteractions = new Map<string, InteractionData>()
-        newInteractionsMap.set(zapActor, actorInteractions)
-      }
 
-      for (const zapSubject of zapSubjects) {
-        if(actorInteractions.has(zapSubject)) {
-          duplicateInteractions++
-          continue
+    for (const actor of actors) {
+      for (const subject of subjects) {
+        const alreadyAggregated = addZapAmount(zapTotalsByActorSubject, actor, subject, zapAmountMsats)
+        if (alreadyAggregated) {
+          aggregatedInteractions++
+        } else {
+          totalInteractions++
         }
-
-        actorInteractions.set(zapSubject, {confidence, value, dos})
-        totalInteractions++
       }
     }
   }
 
-  console.log("GrapeRank : nostr interpreter : applyZapInteractions : total interpreted ", totalInteractions, " new interactions, skipped ", duplicateInteractions, " duplicates and ", skippedInvalid, " invalid zap receipts")
+  if (pairMode === 'event-forward' && eventActorMode && options?.stageEventActorSenderTotals) {
+    options.stageEventActorSenderTotals(dos, eventActorSenderTotals)
+  }
+
+  const newInteractionsMap = buildInteractionsFromZapTotals(instance, dos, zapTotalsByActorSubject, resolveValue)
+
+  console.log("GrapeRank : nostr interpreter : applyZapInteractions : total interpreted ", totalInteractions, " new interactions, aggregated ", aggregatedInteractions, " repeated zaps and ", skippedInvalid, " invalid zap receipts")
   return newInteractionsMap
 }
 
