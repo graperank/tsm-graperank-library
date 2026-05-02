@@ -8,11 +8,6 @@ type ZapTotalsByActorSubject = Map<actorId, Map<subjectId, number>>
 type ZapEventActorSenderTotals = ZapTotalsByActorSubject
 type ZapEventActorSenderTotalsByDos = Map<number, ZapEventActorSenderTotals>
 
-type ApplyZapInteractionsOptions = {
-  // Optional hook used by interpreter factories to keep staged finalization
-  // state outside `NostrInterpreterClass`.
-  stageEventActorSenderTotals?: (dos: number, totalsByEventActor: ZapEventActorSenderTotals) => void
-}
 
 function getFirstTagValue(event: NostrEvent, tagName: string): string | undefined {
   const found = event.tags.find((t) => t[0] === tagName)
@@ -471,7 +466,6 @@ export function getEventsAuthors(events: Set<NostrEvent>, exclude? : actorId[]) 
 export async function applyZapInteractions(
   instance : NostrInterpreterClass<NostrInterpreterParams>,
   dos : number,
-  options?: ApplyZapInteractionsOptions,
 ) : Promise<InteractionsMap | undefined> {
   console.log("GrapeRank : nostr interpreter : applyZapInteractions()")
   const actorType = instance.params.actorType
@@ -507,7 +501,6 @@ export async function applyZapInteractions(
   let fetchedIndex = dos - 1
   const fetchedSet = instance.fetched[fetchedIndex]
   const zapTotalsByActorSubject: ZapTotalsByActorSubject = new Map()
-  const eventActorSenderTotals: ZapEventActorSenderTotals = new Map()
   let totalInteractions : number = 0
   let aggregatedInteractions : number = 0
   let skippedInvalid : number = 0
@@ -537,11 +530,19 @@ export async function applyZapInteractions(
       }
 
       if (pairMode === 'event-forward') {
-        actors = [sender]
-        subjects = eventAuthorPubkeys
-        eventActorIds.forEach((eventActorId) => {
-          addZapAmount(eventActorSenderTotals, eventActorId, sender, zapAmountMsats)
-        })
+        // Directly emit eventActor -> author with zap-weighted value
+        // Semantic event rank from POV provides the actor influence in calculator
+        for (const eventActorId of eventActorIds) {
+          for (const authorPubkey of eventAuthorPubkeys) {
+            const alreadyAggregated = addZapAmount(zapTotalsByActorSubject, eventActorId, authorPubkey, zapAmountMsats)
+            if (alreadyAggregated) {
+              aggregatedInteractions++
+            } else {
+              totalInteractions++
+            }          }
+        }
+        // Skip the generic actor/subject accumulation below
+        continue
       } else {
         actors = eventAuthorPubkeys
         subjects = [sender]
@@ -569,10 +570,6 @@ export async function applyZapInteractions(
         }
       }
     }
-  }
-
-  if (pairMode === 'event-forward' && eventActorMode && options?.stageEventActorSenderTotals) {
-    options.stageEventActorSenderTotals(dos, eventActorSenderTotals)
   }
 
   const newInteractionsMap = buildInteractionsFromZapTotals(instance, dos, zapTotalsByActorSubject, resolveValue)

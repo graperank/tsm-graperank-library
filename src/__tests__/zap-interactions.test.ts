@@ -1,8 +1,7 @@
 import { NostrEvent } from '../lib/nostr-tools'
 import { NostrInterpreterClass } from '../nostr-interpreters/classes'
-import { applyZapInteractions, finalizeZapEventActorProjection } from '../nostr-interpreters/callbacks'
+import { applyZapInteractions } from '../nostr-interpreters/callbacks'
 import { buildEventActorId } from '../nostr-interpreters/helpers'
-import type { Interaction } from '../graperank/types'
 
 type ZapActorType = 'e' | 'p' | 'pubkey'
 type ZapSubjectType = 'e' | 'p' | 'pubkey'
@@ -49,10 +48,6 @@ function buildZapInterpreter(
   subjectType: ZapSubjectType,
   thresholdParams?: Record<string, number>,
 ): NostrInterpreterClass<any> {
-  // Mirrors factory wiring: keep zap projection staging state in closure,
-  // not on the generic `NostrInterpreterClass` instance.
-  const pendingEventActorSenderTotalsByDos = new Map<number, Map<string, Map<string, number>>>()
-
   return new NostrInterpreterClass({
     interpretKind: 9735,
     fetchKinds: [9735, 9734],
@@ -67,19 +62,7 @@ function buildZapInterpreter(
       subjectType,
       ...(thresholdParams || {}),
     },
-    interpret: (instance, dos) => applyZapInteractions(instance, dos, {
-      stageEventActorSenderTotals: (iterationDos, totalsByEventActor) => {
-        // Stage per-iteration totals for one-shot finalize projection.
-        if (totalsByEventActor.size > 0) {
-          pendingEventActorSenderTotalsByDos.set(iterationDos, totalsByEventActor)
-        } else {
-          pendingEventActorSenderTotalsByDos.delete(iterationDos)
-        }
-
-        instance.needsFinalization = pendingEventActorSenderTotalsByDos.size > 0
-      },
-    }),
-    finalize: (instance, interactions) => finalizeZapEventActorProjection(instance, interactions, pendingEventActorSenderTotalsByDos),
+    interpret: (instance, dos) => applyZapInteractions(instance, dos),
   })
 }
 
@@ -193,7 +176,7 @@ describe('applyZapInteractions', () => {
     })
   })
 
-  test('finalize emits one-shot eventActor -> author projection for event-forward zaps', async () => {
+  test('event-forward emits eventActor -> author directly with zap-weighted value', async () => {
     const sender = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     const authorIncluded = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
     const authorFilteredOut = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
@@ -245,32 +228,27 @@ describe('applyZapInteractions', () => {
       ]),
     ]
 
-    const preFinalizeInteractions = await interpreter.interpret(1)
-    expect(preFinalizeInteractions?.get(sender)?.get(authorIncluded)?.value).toBe(5)
-    expect(interpreter.needsFinalization).toBe(true)
+    const interactions = await interpreter.interpret(1)
 
-    const existingInteractions: Interaction[] = [
-      {
-        interpreterId: 'nostr-1111',
-        index: 0,
-        actor: sender,
-        subject: authorIncluded,
-        confidence: 0.5,
-        value: 1,
-        dos: 1,
-      },
-    ]
-
-    const finalized = await interpreter.finalize(existingInteractions)
-    expect(finalized?.get(eventActorIncluded!)?.get(authorIncluded)).toEqual({
+    // Event-forward directly emits eventActor -> author
+    // Two zaps of 7000 msats each = 14000 total, exceeding >10000 threshold → value 5
+    expect(interactions?.get(eventActorIncluded!)?.get(authorIncluded)).toEqual({
       confidence: 0.5,
       value: 5,
       dos: 1,
     })
-    expect(finalized?.get(eventActorFilteredOut!)).toBeUndefined()
-    expect(interpreter.needsFinalization).toBe(false)
 
-    const finalizedAgain = await interpreter.finalize(existingInteractions)
-    expect(finalizedAgain).toBeUndefined()
+    // Filtered-out event actor also emits its own eventActor -> author edge
+    expect(interactions?.get(eventActorFilteredOut!)?.get(authorFilteredOut)).toEqual({
+      confidence: 0.5,
+      value: 5,
+      dos: 1,
+    })
+
+    // Zap senders must NOT appear as actors in event-forward mode
+    expect(interactions?.get(sender)).toBeUndefined()
+
+    // No finalization needed for event-forward
+    expect(interpreter.needsFinalization).toBe(false)
   })
 })

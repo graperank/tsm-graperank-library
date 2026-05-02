@@ -1,6 +1,6 @@
 import { InterpreterParams } from "../graperank/types";
 import { NostrInterpreterClass, NostrInterpreterFactory } from "./classes";
-import { applyAttestationInteractions, applyAttestorRecommendationInteractions, applyInteractionsByTag, applyZapInteractions, finalizeZapEventActorProjection, validateEachEventHasAuthor } from "./callbacks";
+import { applyAttestationInteractions, applyAttestorRecommendationInteractions, applyInteractionsByTag, applyZapInteractions, validateEachEventHasAuthor } from "./callbacks";
 import { NostrInterpreterParams } from "./types";
 
 export const InterpreterFactory = new NostrInterpreterFactory()
@@ -124,13 +124,6 @@ InterpreterFactory.set('nostr-1-t', () => new NostrInterpreterClass<HashtagParam
 
 interface ZapParams extends NostrInterpreterParams {}
 InterpreterFactory.set('nostr-9735', () => {
-  // Staged per-DOS totals live in the factory closure so zap-specific
-  // finalization state does not leak into the generic interpreter class.
-  const pendingEventActorSenderTotalsByDos = new Map<number, Map<string, Map<string, number>>>()
-  // The interpreter instance is reused, so detect request boundaries
-  // and reset staged state when a new request is attached.
-  let previousRequestRef: unknown
-
   return new NostrInterpreterClass<ZapParams>(
     {
       interpretKind: 9735,
@@ -146,29 +139,7 @@ InterpreterFactory.set('nostr-9735', () => {
         subjectType: 'pubkey'
       },
       interpret : (instance, fetchedIndex) => {
-        if (instance.request !== previousRequestRef) {
-          // Fresh request lifecycle: clear any staged totals from prior runs.
-          pendingEventActorSenderTotalsByDos.clear()
-          instance.needsFinalization = false
-          previousRequestRef = instance.request
-        }
-
-        return applyZapInteractions(instance, fetchedIndex, {
-          stageEventActorSenderTotals: (dos, totalsByEventActor) => {
-            // Event-forward zaps stage eventActor->sender totals for projection
-            // in the generic finalize phase after all interpreters run.
-            if (totalsByEventActor.size > 0) {
-              pendingEventActorSenderTotalsByDos.set(dos, totalsByEventActor)
-            } else {
-              pendingEventActorSenderTotalsByDos.delete(dos)
-            }
-
-            instance.needsFinalization = pendingEventActorSenderTotalsByDos.size > 0
-          },
-        })
-      },
-      finalize: async (instance, interactions) => {
-        return finalizeZapEventActorProjection(instance, interactions, pendingEventActorSenderTotalsByDos)
+        return applyZapInteractions(instance, fetchedIndex)
       },
     }
   )
