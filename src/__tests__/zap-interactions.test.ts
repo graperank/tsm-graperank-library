@@ -113,7 +113,7 @@ describe('applyZapInteractions', () => {
     })
   })
 
-  test('maps pubkey -> e as event author -> zap sender in event mode', async () => {
+  test('maps pubkey -> e as zap sender -> ranked event in event-reverse mode', async () => {
     const sender = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     const eventAuthor = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
     const eventId = '3333333333333333333333333333333333333333333333333333333333333333'
@@ -137,9 +137,9 @@ describe('applyZapInteractions', () => {
     ]
 
     const interactions = await applyZapInteractions(interpreter, 1)
-    const actorInteractions = interactions?.get(eventAuthor)
+    const actorInteractions = interactions?.get(sender)
 
-    expect(actorInteractions?.get(sender)).toEqual({
+    expect(actorInteractions?.get(eventActorId!)).toEqual({
       confidence: 0.5,
       value: 1,
       dos: 1,

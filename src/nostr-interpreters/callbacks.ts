@@ -1,12 +1,10 @@
 import { NostrEvent } from '../lib/nostr-tools'
-import { InteractionsMap, InteractionData, InteractionsList, actorId, subjectId } from "../graperank/types"
+import { InteractionsMap, InteractionData, actorId, subjectId } from "../graperank/types"
 import { NostrInterpreterClass } from "./classes"
 import { NostrInterpreterParams, NostrType } from './types'
 import { getEventActor, getEventSubject, validatePubkey } from './helpers'
 
 type ZapTotalsByActorSubject = Map<actorId, Map<subjectId, number>>
-type ZapEventActorSenderTotals = ZapTotalsByActorSubject
-type ZapEventActorSenderTotalsByDos = Map<number, ZapEventActorSenderTotals>
 
 
 function getFirstTagValue(event: NostrEvent, tagName: string): string | undefined {
@@ -198,137 +196,6 @@ function buildInteractionsFromZapTotals(
   return interactions
 }
 
-function getEventActorResolvedPubkeys(
-  instance: NostrInterpreterClass<NostrInterpreterParams>,
-  dos: number,
-  zapReceipt: NostrEvent,
-): {
-  eventActorIds: actorId[]
-  eventAuthorPubkeys: subjectId[]
-} {
-  const eventActorIds = getActorsForEvent(instance, dos, zapReceipt, 'e', { requireBoundActors: true })
-  if (!eventActorIds.length) {
-    return { eventActorIds: [], eventAuthorPubkeys: [] }
-  }
-
-  const resolvedTypeValues = instance.getPovActorContext()?.eventActorResolvedTypeValues
-  if (!resolvedTypeValues?.size) {
-    return { eventActorIds, eventAuthorPubkeys: [] }
-  }
-
-  const eventAuthorPubkeys = new Set<subjectId>()
-  for (const eventActorId of eventActorIds) {
-    const resolvedValue = resolvedTypeValues.get(eventActorId)
-    if (!resolvedValue) continue
-
-    const candidates = Array.isArray(resolvedValue) ? resolvedValue : [resolvedValue]
-    for (const candidate of candidates) {
-      if (typeof candidate !== 'string' || !validatePubkey(candidate)) continue
-      eventAuthorPubkeys.add(candidate)
-    }
-  }
-
-  return {
-    eventActorIds,
-    eventAuthorPubkeys: [...eventAuthorPubkeys],
-  }
-}
-
-export async function finalizeZapEventActorProjection(
-  instance: NostrInterpreterClass<NostrInterpreterParams>,
-  interactions: InteractionsList,
-  pendingByDos: ZapEventActorSenderTotalsByDos,
-): Promise<InteractionsMap | undefined> {
-  // Finalization is one-shot per request execution. Consume staged totals
-  // before projecting so repeated finalize calls are naturally idempotent.
-  const pendingEntries = [...pendingByDos.entries()]
-  pendingByDos.clear()
-  instance.needsFinalization = false
-
-  if (!pendingEntries.length) {
-    return undefined
-  }
-
-  const resolvedTypeValues = instance.getPovActorContext()?.eventActorResolvedTypeValues
-  if (!resolvedTypeValues?.size) {
-    return undefined
-  }
-
-  const existingSubjects = new Set<subjectId>()
-  for (const interaction of interactions) {
-    existingSubjects.add(interaction.subject)
-  }
-
-  // Only emit projections onto subjects that already exist in the request's
-  // interpreted graph, keeping event-actor projection bounded to prior outputs.
-  if (!existingSubjects.size) {
-    return undefined
-  }
-
-  const mergedSenderTotalsByEventActor: ZapEventActorSenderTotals = new Map()
-  pendingEntries.forEach(([, totalsByEventActor]) => {
-    totalsByEventActor.forEach((senderTotals, eventActorId) => {
-      let mergedSenderTotals = mergedSenderTotalsByEventActor.get(eventActorId)
-      if (!mergedSenderTotals) {
-        mergedSenderTotals = new Map()
-        mergedSenderTotalsByEventActor.set(eventActorId, mergedSenderTotals)
-      }
-
-      senderTotals.forEach((msats, senderPubkey) => {
-        const priorTotal = mergedSenderTotals!.get(senderPubkey) || 0
-        mergedSenderTotals!.set(senderPubkey, priorTotal + msats)
-      })
-    })
-  })
-
-  if (!mergedSenderTotalsByEventActor.size) {
-    return undefined
-  }
-
-  const finalizedInteractions: InteractionsMap = new Map()
-  const confidence = instance.params.confidence as number || .5
-  const dosValues = pendingEntries.map(([dos]) => dos)
-  const finalizedDos = dosValues.length ? Math.max(...dosValues) : undefined
-
-  mergedSenderTotalsByEventActor.forEach((senderTotals, eventActorId) => {
-    if (!senderTotals.size) return
-
-    const resolvedValue = resolvedTypeValues.get(eventActorId)
-    if (!resolvedValue) return
-
-    const resolvedSubjects = (Array.isArray(resolvedValue) ? resolvedValue : [resolvedValue]).filter(
-      (candidate): candidate is string => typeof candidate === 'string' && validatePubkey(candidate),
-    )
-    if (!resolvedSubjects.length) return
-
-    let projectedValue = 0
-    senderTotals.forEach((msats) => {
-      projectedValue += resolveZapInteractionValue(instance.params, msats)
-    })
-
-    let actorInteractions = finalizedInteractions.get(eventActorId)
-    if (!actorInteractions) {
-      actorInteractions = new Map()
-      finalizedInteractions.set(eventActorId, actorInteractions)
-    }
-
-    resolvedSubjects.forEach((resolvedSubject) => {
-      if (!existingSubjects.has(resolvedSubject)) return
-
-      actorInteractions!.set(resolvedSubject, {
-        confidence,
-        value: projectedValue,
-        dos: finalizedDos,
-      })
-    })
-
-    if (!actorInteractions.size) {
-      finalizedInteractions.delete(eventActorId)
-    }
-  })
-
-  return finalizedInteractions.size ? finalizedInteractions : undefined
-}
 
 // A generic callback for interpreting interactions from individual tags
 // where each tag represents a single actor/subject interaction in an event,
@@ -506,58 +373,49 @@ export async function applyZapInteractions(
   let skippedInvalid : number = 0
 
   for(let zapReceipt of fetchedSet) {
-    const sender = resolveZapSenderPubkey(zapReceipt)
-    if(!sender) {
-      skippedInvalid++
-      continue
-    }
-
     const recipient = getEventSubject('p', zapReceipt)
-    if ((pairMode === 'pubkey-forward' || pairMode === 'pubkey-reverse') && !recipient) {
-      skippedInvalid++
-      continue
-    }
-
     const zapAmountMsats = parseZapAmountMsats(zapReceipt)
     let actors: actorId[] = []
     let subjects: subjectId[] = []
 
-    if (pairMode === 'event-forward' || pairMode === 'event-reverse') {
-      const { eventActorIds, eventAuthorPubkeys } = getEventActorResolvedPubkeys(instance, dos, zapReceipt)
-      if (!eventActorIds.length || !eventAuthorPubkeys.length) {
+    if (pairMode === 'event-forward') {
+      // actor = semantic-ranked event (from POV bindings on this zap receipt)
+      // subject = zap recipient pubkey (author of the zapped event per NIP-57 `p` tag)
+      // value = zap-weighted total; event rank supplies the actor influence in the calculator.
+      const eventActorIds = getActorsForEvent(instance, dos, zapReceipt, 'e', { requireBoundActors: true })
+      if (!eventActorIds.length || !recipient) {
         skippedInvalid++
         continue
       }
-
-      if (pairMode === 'event-forward') {
-        // Directly emit eventActor -> author with zap-weighted value
-        // Semantic event rank from POV provides the actor influence in calculator
-        for (const eventActorId of eventActorIds) {
-          for (const authorPubkey of eventAuthorPubkeys) {
-            const alreadyAggregated = addZapAmount(zapTotalsByActorSubject, eventActorId, authorPubkey, zapAmountMsats)
-            if (alreadyAggregated) {
-              aggregatedInteractions++
-            } else {
-              totalInteractions++
-            }          }
-        }
-        // Skip the generic actor/subject accumulation below
+      actors = eventActorIds
+      subjects = [recipient]
+    } else if (pairMode === 'event-reverse') {
+      // actor = zap sender pubkey; subject = ranked event (from POV bindings).
+      const sender = resolveZapSenderPubkey(zapReceipt)
+      const eventActorIds = getActorsForEvent(instance, dos, zapReceipt, 'e', { requireBoundActors: true })
+      if (!sender || !eventActorIds.length) {
+        skippedInvalid++
         continue
-      } else {
-        actors = eventAuthorPubkeys
-        subjects = [sender]
       }
-    } else if (pairMode === 'pubkey-forward') {
       actors = [sender]
-      subjects = recipient ? [recipient] : []
+      subjects = eventActorIds
+    } else if (pairMode === 'pubkey-forward') {
+      const sender = resolveZapSenderPubkey(zapReceipt)
+      if (!sender || !recipient) {
+        skippedInvalid++
+        continue
+      }
+      actors = [sender]
+      subjects = [recipient]
     } else {
-      actors = recipient ? [recipient] : []
+      // pubkey-reverse
+      const sender = resolveZapSenderPubkey(zapReceipt)
+      if (!sender || !recipient) {
+        skippedInvalid++
+        continue
+      }
+      actors = [recipient]
       subjects = [sender]
-    }
-
-    if(!actors.length || !subjects.length) {
-      skippedInvalid++
-      continue
     }
 
     for (const actor of actors) {
