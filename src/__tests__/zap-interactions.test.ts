@@ -238,10 +238,11 @@ describe('applyZapInteractions', () => {
       dos: 1,
     })
 
-    // Filtered-out event actor also emits its own eventActor -> author edge
+    // Filtered-out event actor also emits its own eventActor -> author edge.
+    // Single 7000 msats zap does not cross >10000 threshold, so it keeps default value 1.
     expect(interactions?.get(eventActorFilteredOut!)?.get(authorFilteredOut)).toEqual({
       confidence: 0.5,
-      value: 5,
+      value: 1,
       dos: 1,
     })
 
