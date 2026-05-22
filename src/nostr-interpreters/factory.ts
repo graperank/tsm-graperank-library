@@ -1,6 +1,6 @@
 import { InterpreterParams } from "../graperank/types";
 import { NostrInterpreterClass, NostrInterpreterFactory } from "./classes";
-import { applyAttestationInteractions, applyAttestorRecommendationInteractions, applyInteractionsByTag, applyZapInteractions, validateEachEventHasAuthor } from "./callbacks";
+import { applyAttestationInteractions, applyAttestorRecommendationInteractions, applyEventAuthorBaseline, applyInteractionsByTag, applyZapInteractions, validateEachEventHasAuthor } from "./callbacks";
 import { NostrInterpreterParams } from "./types";
 
 export const InterpreterFactory = new NostrInterpreterFactory()
@@ -117,6 +117,29 @@ InterpreterFactory.set('nostr-1-t', () => new NostrInterpreterClass<HashtagParam
         }
       }
       return actors
+    }
+  }
+))
+
+
+interface EventAuthorBaselineParams extends NostrInterpreterParams {}
+InterpreterFactory.set('nostr-0', () => new NostrInterpreterClass<EventAuthorBaselineParams>(
+  {
+    interpretKind: 0,
+    fetchKinds : [],
+    skipFetch : true,
+    label: "Event Author Baseline",
+    description: 'Emits baseline eventActor-to-author interactions from resolved event-actor POV metadata without fetching events.',
+    allowedActorTypes: ['e'],
+    allowedSubjectTypes: ['pubkey'],
+    defaultParams : {
+      value : 1,
+      confidence : .2,
+      actorType: 'e',
+      subjectType: 'pubkey'
+    },
+    interpret : (instance, fetchedIndex) => {
+      return applyEventAuthorBaseline(instance, fetchedIndex)
     }
   }
 ))

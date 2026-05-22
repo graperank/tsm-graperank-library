@@ -47,6 +47,7 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   readonly description: string
   // 
   readonly fetchKinds : number[]
+  readonly skipFetch : boolean
   readonly allowedActorTypes: string[]
   readonly allowedSubjectTypes: string[]
   request? : InterpreterRequest<ParamsType>
@@ -74,6 +75,7 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     this.label = config.label
     this.description = config.description
     this.fetchKinds = config.fetchKinds
+    this.skipFetch = !!config.skipFetch
     this.allowedActorTypes = config.allowedActorTypes
     this.allowedSubjectTypes = config.allowedSubjectTypes
     this.defaultParams = config.defaultParams
@@ -834,10 +836,15 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     if(!this.request) throw('no request set for this interpreter')
     actors = actors || new Set(this.request?.actors)
 
+    if (this.skipFetch) {
+      this.fetched.push(new Set<NostrEvent>())
+      console.log("GrapeRank : ", this.interpreterId, " : skipFetch=true; using POV context only (dos=", this.fetched.length, ")")
+      return this.fetched.length
+    }
+
     if (this.povActorContext?.actorMode === 'event') {
       return this.fetchDataByEventActors(actors, onFetchProgress)
     }
-    
 
     // actorslists is actors broken into an array of list, 
     // where each list is maximum size allowed for relay requests

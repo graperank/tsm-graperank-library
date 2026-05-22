@@ -72,6 +72,7 @@ export type NostrInterpreterClassConfig<ParamsType extends NostrInterpreterParam
   label: string,
   description: string,
   fetchKinds : number[],
+  skipFetch? : boolean,
   allowedActorTypes : NostrType[],
   allowedSubjectTypes : NostrType[],
   defaultParams : ParamsType,

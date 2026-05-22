@@ -1,6 +1,6 @@
 import { NostrEvent } from '../lib/nostr-tools'
 import { NostrInterpreterClass } from '../nostr-interpreters/classes'
-import { applyZapInteractions } from '../nostr-interpreters/callbacks'
+import { applyEventAuthorBaseline, applyZapInteractions } from '../nostr-interpreters/callbacks'
 import { buildEventActorId } from '../nostr-interpreters/helpers'
 
 type ZapActorType = 'e' | 'p' | 'pubkey'
@@ -63,6 +63,24 @@ function buildZapInterpreter(
       ...(thresholdParams || {}),
     },
     interpret: (instance, dos) => applyZapInteractions(instance, dos),
+  })
+}
+
+function buildEventAuthorBaselineInterpreter(): NostrInterpreterClass<any> {
+  return new NostrInterpreterClass({
+    interpretKind: 0,
+    fetchKinds: [],
+    label: 'Event author baseline test interpreter',
+    description: 'Event author baseline interpreter test config',
+    allowedActorTypes: ['e'],
+    allowedSubjectTypes: ['pubkey'],
+    defaultParams: {
+      value: 1,
+      confidence: 0.2,
+      actorType: 'e',
+      subjectType: 'pubkey',
+    },
+    interpret: (instance, dos) => applyEventAuthorBaseline(instance, dos),
   })
 }
 
@@ -230,26 +248,113 @@ describe('applyZapInteractions', () => {
 
     const interactions = await interpreter.interpret(1)
 
-    // Event-forward directly emits eventActor -> author
-    // Two zaps of 7000 msats each = 14000 total, exceeding >10000 threshold → value 5
     expect(interactions?.get(eventActorIncluded!)?.get(authorIncluded)).toEqual({
       confidence: 0.5,
       value: 5,
       dos: 1,
     })
 
-    // Filtered-out event actor also emits its own eventActor -> author edge.
-    // Single 7000 msats zap does not cross >10000 threshold, so it keeps default value 1.
     expect(interactions?.get(eventActorFilteredOut!)?.get(authorFilteredOut)).toEqual({
       confidence: 0.5,
       value: 1,
       dos: 1,
     })
 
-    // Zap senders must NOT appear as actors in event-forward mode
     expect(interactions?.get(sender)).toBeUndefined()
-
-    // No finalization needed for event-forward
     expect(interpreter.needsFinalization).toBe(false)
+  })
+
+  test('event-forward omits authors of events with no zaps', async () => {
+    const zappedAuthor = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    const unzappedAuthor = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    const zappedEventId = 'aaaa111111111111111111111111111111111111111111111111111111111111'
+    const unzappedEventId = 'bbbb222222222222222222222222222222222222222222222222222222222222'
+
+    const eventActorZapped = buildEventActorId({ referenceType: 'e', value: zappedEventId, relayHints: [] })
+    const eventActorUnzapped = buildEventActorId({ referenceType: 'e', value: unzappedEventId, relayHints: [] })
+    expect(eventActorZapped).toBeDefined()
+    expect(eventActorUnzapped).toBeDefined()
+
+    const sender = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const zapReceipt = buildZapReceiptEvent(sender, zappedAuthor, zappedEventId, {
+      id: 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1',
+      amountMsats: 7000,
+    })
+
+    const interpreter = buildZapInterpreter('e', 'pubkey')
+    interpreter.fetched = [new Set([zapReceipt])]
+    interpreter.setPovActorContext({
+      actorMode: 'event',
+      povType: 'pubkey',
+      rankedPov: [
+        [eventActorZapped!, 0.9],
+        [eventActorUnzapped!, 0.7],
+      ],
+      eventActorReferenceMap: new Map([
+        [eventActorZapped!, { referenceType: 'e', value: zappedEventId, relayHints: [] }],
+        [eventActorUnzapped!, { referenceType: 'e', value: unzappedEventId, relayHints: [] }],
+      ]),
+      eventActorResolvedTypeValues: new Map([
+        [eventActorZapped!, zappedAuthor],
+        [eventActorUnzapped!, unzappedAuthor],
+      ]),
+    })
+
+    ;(interpreter as any).eventActorBindingsByDos = [
+      new Map([[zapReceipt.id, new Set([eventActorZapped!])]]),
+    ]
+
+    const interactions = await interpreter.interpret(1)
+
+    expect(interactions?.get(eventActorZapped!)?.get(zappedAuthor)).toEqual({
+      confidence: 0.5,
+      value: 1,
+      dos: 1,
+    })
+    expect(interactions?.get(eventActorUnzapped!)).toBeUndefined()
+  })
+
+  test('event author baseline emits all resolved authors without fetching zaps', async () => {
+    const firstAuthor = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    const secondAuthor = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    const firstEventId = 'aaaa111111111111111111111111111111111111111111111111111111111111'
+    const secondEventId = 'bbbb222222222222222222222222222222222222222222222222222222222222'
+
+    const firstEventActor = buildEventActorId({ referenceType: 'e', value: firstEventId, relayHints: [] })
+    const secondEventActor = buildEventActorId({ referenceType: 'e', value: secondEventId, relayHints: [] })
+    expect(firstEventActor).toBeDefined()
+    expect(secondEventActor).toBeDefined()
+
+    const interpreter = buildEventAuthorBaselineInterpreter()
+    interpreter.fetched = [new Set()]
+    interpreter.setPovActorContext({
+      actorMode: 'event',
+      povType: 'pubkey',
+      rankedPov: [
+        [firstEventActor!, 0.9],
+        [secondEventActor!, 0.7],
+      ],
+      eventActorReferenceMap: new Map([
+        [firstEventActor!, { referenceType: 'e', value: firstEventId, relayHints: [] }],
+        [secondEventActor!, { referenceType: 'e', value: secondEventId, relayHints: [] }],
+      ]),
+      eventActorResolvedTypeValues: new Map([
+        [firstEventActor!, firstAuthor],
+        [secondEventActor!, secondAuthor],
+      ]),
+    })
+
+    const interactions = await interpreter.interpret(1)
+
+    expect(interactions?.get(firstEventActor!)?.get(firstAuthor)).toEqual({
+      confidence: 0.2,
+      value: 1,
+      dos: 1,
+    })
+    expect(interactions?.get(secondEventActor!)?.get(secondAuthor)).toEqual({
+      confidence: 0.2,
+      value: 1,
+      dos: 1,
+    })
   })
 })

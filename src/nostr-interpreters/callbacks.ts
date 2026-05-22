@@ -196,7 +196,6 @@ function buildInteractionsFromZapTotals(
   return interactions
 }
 
-
 // A generic callback for interpreting interactions from individual tags
 // where each tag represents a single actor/subject interaction in an event,
 // and where one tag index is the subject id and another is the actor's interaction,
@@ -372,24 +371,76 @@ export async function applyZapInteractions(
   let aggregatedInteractions : number = 0
   let skippedInvalid : number = 0
 
+  if (pairMode === 'event-forward') {
+    // Event-forward emits (eventActor -> author) edges only for events that
+    // received at least one zap. Authors come from POV-resolved authors so
+    // the subject is independent of the zap receipt's `p` tag. Unzapped event
+    // authors are NOT emitted here; they should receive a baseline edge from
+    // a separate baseline interpreter (e.g. nostr-37573-p) configured in the
+    // same request, which the calculator merges automatically.
+    const resolvedAuthorsByEventActor = instance.getPovActorContext()?.eventActorResolvedTypeValues
+    if (!resolvedAuthorsByEventActor?.size) {
+      console.log("GrapeRank : nostr interpreter : applyZapInteractions : event-forward has no resolved authors")
+      return new Map()
+    }
+
+    const msatsByEventActor = new Map<actorId, number>()
+    for (const zapReceipt of fetchedSet) {
+      const eventActorIds = getActorsForEvent(instance, dos, zapReceipt, 'e', { requireBoundActors: true })
+      if (!eventActorIds.length) {
+        skippedInvalid++
+        continue
+      }
+      const zapAmountMsats = parseZapAmountMsats(zapReceipt)
+      for (const eventActorId of eventActorIds) {
+        const previousTotal = msatsByEventActor.get(eventActorId) || 0
+        msatsByEventActor.set(eventActorId, previousTotal + zapAmountMsats)
+        if (previousTotal > 0) {
+          aggregatedInteractions++
+        } else {
+          totalInteractions++
+        }
+      }
+    }
+
+    const eventForwardInteractions: InteractionsMap = new Map()
+    const confidence = instance.params.confidence as number || .5
+    msatsByEventActor.forEach((totalMsats, eventActorId) => {
+      const resolvedValue = resolvedAuthorsByEventActor.get(eventActorId)
+      if (!resolvedValue) return
+      const authors = (Array.isArray(resolvedValue) ? resolvedValue : [resolvedValue])
+        .filter((candidate): candidate is string => typeof candidate === 'string' && validatePubkey(candidate))
+      if (!authors.length) return
+
+      const value = resolveValue(totalMsats)
+      const actorInteractions = new Map<subjectId, InteractionData>()
+      for (const author of authors) {
+        actorInteractions.set(author, { confidence, value, dos })
+      }
+      eventForwardInteractions.set(eventActorId, actorInteractions)
+    })
+
+    console.log(
+      "GrapeRank : nostr interpreter : applyZapInteractions : event-forward emitted ",
+      eventForwardInteractions.size,
+      " zapped eventActor edges (",
+      totalInteractions,
+      " zapped events, aggregated ",
+      aggregatedInteractions,
+      " repeated zaps, skipped ",
+      skippedInvalid,
+      " unbound zap receipts)",
+    )
+    return eventForwardInteractions
+  }
+
   for(let zapReceipt of fetchedSet) {
     const recipient = getEventSubject('p', zapReceipt)
     const zapAmountMsats = parseZapAmountMsats(zapReceipt)
     let actors: actorId[] = []
     let subjects: subjectId[] = []
 
-    if (pairMode === 'event-forward') {
-      // actor = semantic-ranked event (from POV bindings on this zap receipt)
-      // subject = zap recipient pubkey (author of the zapped event per NIP-57 `p` tag)
-      // value = zap-weighted total; event rank supplies the actor influence in the calculator.
-      const eventActorIds = getActorsForEvent(instance, dos, zapReceipt, 'e', { requireBoundActors: true })
-      if (!eventActorIds.length || !recipient) {
-        skippedInvalid++
-        continue
-      }
-      actors = eventActorIds
-      subjects = [recipient]
-    } else if (pairMode === 'event-reverse') {
+    if (pairMode === 'event-reverse') {
       // actor = zap sender pubkey; subject = ranked event (from POV bindings).
       const sender = resolveZapSenderPubkey(zapReceipt)
       const eventActorIds = getActorsForEvent(instance, dos, zapReceipt, 'e', { requireBoundActors: true })
@@ -608,4 +659,64 @@ export async function applyAttestationInteractions(
   )
 
   return newInteractionsMap
+}
+
+
+export async function applyEventAuthorBaseline(
+  instance: NostrInterpreterClass<NostrInterpreterParams>,
+  dos: number,
+): Promise<InteractionsMap | undefined> {
+  console.log("GrapeRank : nostr interpreter : applyEventAuthorBaseline()")
+
+  const actorType = instance.params.actorType
+  const subjectType = instance.params.subjectType
+  if (!actorType || !instance.allowedActorTypes.includes(actorType)) return undefined
+  if (!subjectType || !instance.allowedSubjectTypes.includes(subjectType)) return undefined
+
+  const povActorContext = instance.getPovActorContext()
+  if (povActorContext?.actorMode !== 'event') {
+    console.log("GrapeRank : nostr interpreter : applyEventAuthorBaseline : skipped non-event POV actor mode")
+    return new Map()
+  }
+
+  const resolvedAuthorsByEventActor = povActorContext.eventActorResolvedTypeValues
+  if (!resolvedAuthorsByEventActor?.size) {
+    console.log("GrapeRank : nostr interpreter : applyEventAuthorBaseline : no resolved authors in POV context")
+    return new Map()
+  }
+
+  const value = (instance.params.value as number) ?? 1
+  const confidence = (instance.params.confidence as number) ?? .5
+
+  const interactions: InteractionsMap = new Map()
+  let totalEdges = 0
+  let skippedInvalid = 0
+
+  resolvedAuthorsByEventActor.forEach((resolvedValue, eventActorId) => {
+    const authors = (Array.isArray(resolvedValue) ? resolvedValue : [resolvedValue])
+      .filter((candidate): candidate is string => typeof candidate === 'string' && validatePubkey(candidate))
+    if (!authors.length) {
+      skippedInvalid++
+      return
+    }
+
+    const actorInteractions = new Map<subjectId, InteractionData>()
+    for (const author of authors) {
+      actorInteractions.set(author, { confidence, value, dos })
+    }
+    interactions.set(eventActorId, actorInteractions)
+    totalEdges += authors.length
+  })
+
+  console.log(
+    "GrapeRank : nostr interpreter : applyEventAuthorBaseline : emitted ",
+    totalEdges,
+    " baseline edges across ",
+    interactions.size,
+    " event actors (skipped ",
+    skippedInvalid,
+    " unresolved)",
+  )
+
+  return interactions
 }
