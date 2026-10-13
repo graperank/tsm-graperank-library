@@ -6,6 +6,7 @@ export * from './graperank/nostr-types'
 export * from './nostr-interpreters/callbacks'
 export * from './nostr-interpreters/classes'
 export { InterpreterFactory as NostrInterpreterFactory } from './nostr-interpreters/factory'
+export * from './nostr-interpreters/event-source'
 export * from './nostr-interpreters/helpers'
 export * from './nostr-interpreters/types'
 
