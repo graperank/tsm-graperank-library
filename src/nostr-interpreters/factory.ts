@@ -80,7 +80,29 @@ InterpreterFactory.set('nostr-1984', () => new NostrInterpreterClass<ReportsPara
       other : 0,
     },
     interpret : (instance, fetchedIndex) => {
-      return applyInteractionsByTag(instance, fetchedIndex, instance.request!.params!.subjectType, 1, 2)
+      // instance.params merges the request's params over the defaults; request.params is undefined when a request gives none
+      return applyInteractionsByTag(instance, fetchedIndex, instance.params.subjectType, 1, 2)
+    }
+  }
+))
+
+interface ReactionsParams extends NostrInterpreterParams {}
+InterpreterFactory.set('nostr-7', () => new NostrInterpreterClass<ReactionsParams>(
+  {
+    interpretKind: 7,
+    fetchKinds : [7],
+    label: "Reactions Network",
+    description: 'Interprets reaction events (NIP-25): the reacted note\'s author, from the p tag, is the subject.',
+    allowedActorTypes: ['pubkey', 'p'],
+    allowedSubjectTypes: ['pubkey', 'p'],
+    defaultParams : {
+      value : 1,
+      confidence : .5,
+      actorType: 'pubkey',
+      subjectType: 'p'
+    },
+    interpret : (instance, fetchedIndex) => {
+      return applyInteractionsByTag(instance, fetchedIndex)
     }
   }
 ))

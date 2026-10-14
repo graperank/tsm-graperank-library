@@ -23,6 +23,21 @@ const L1 = hex('11')
 const L2 = hex('22')
 const L3 = hex('33')
 const FILE_SHA = hex('f1')
+const ACTS_SHA = hex('f2')
+
+// Act relations: C reports A as spam twice and B as nudity once (and A once
+// untyped); B reacts to A and to C. Written in the relation-edges columns.
+const ACTS: [string, string, string, string | null, number, number, number][] = [
+  [C, A, 'report', 'spam', 2, 1700000100, 1700000200],
+  [C, B, 'report', 'nudity', 1, 1700000300, 1700000300],
+  [C, A, 'report', null, 1, 1700000050, 1700000050],
+  [B, A, 'reaction', null, 3, 1700000010, 1700000030],
+  [B, C, 'reaction', null, 1, 1700000020, 1700000020],
+]
+const RELATIONS = {
+  report: { graperank: { interpreter: 'nostr-1984', kind: 1984, tags: [['p', '{target}', '{attr}']] } },
+  reaction: { graperank: { interpreter: 'nostr-7', kind: 7, tags: [['p', '{target}']] } },
+}
 
 // The fixture: A follows B and C (list L1), B follows A (L2), A mutes D (L3);
 // C has no list. Written by DuckDB in the lake's column types and sort order.
@@ -57,10 +72,43 @@ async function writeFixture(file: string): Promise<void> {
   instance.closeSync()
 }
 
+async function writeActs(file: string): Promise<void> {
+  const instance = await DuckDBInstance.create(':memory:', { threads: '1' })
+  const conn = await instance.connect()
+  const values = ACTS.map(([s, t, r, a, n, f, l]) => `('${s}','${t}','${r}',${a === null ? 'NULL' : `'${a}'`},${n},${f},${l})`).join(',')
+  await conn.run(
+    `COPY (SELECT unhex(s) AS source, unhex(t) AS target, r AS relation, CAST(a AS VARCHAR) AS attr,
+                  CAST(n AS UBIGINT) AS count, CAST(f AS UBIGINT) AS first_at, CAST(l AS UBIGINT) AS last_at
+           FROM (VALUES ${values}) v(s, t, r, a, n, f, l) ORDER BY source, relation, target, attr)
+     TO '${file}' (FORMAT PARQUET, COMPRESSION ZSTD, WRITE_BLOOM_FILTER false)`
+  )
+  conn.closeSync()
+  instance.closeSync()
+}
+
 beforeAll(async () => {
   dir = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), 'graperank-lake-'))
   fs.mkdirSync(path.join(dir, 'lake'))
   await writeFixture(path.join(dir, 'lake', FILE_SHA))
+  await writeActs(path.join(dir, 'lake', ACTS_SHA))
+  fs.writeFileSync(
+    path.join(dir, 'relations-manifest.json'),
+    JSON.stringify({
+      format: 'nostr4/relations-manifest/1',
+      runs: [
+        { run: 'older', reference_time: 1, relations: RELATIONS, files: { source: [{ sha256: hex('00'), rows: 0 }], target: [] } },
+        {
+          run: '8a5a4d8645f55176',
+          reference_time: 1791417674,
+          relations: RELATIONS,
+          files: {
+            source: [{ sha256: ACTS_SHA, bytes: fs.statSync(path.join(dir, 'lake', ACTS_SHA)).size, rows: ACTS.length, min: B, max: C }],
+            target: [{ sha256: hex('98'), rows: ACTS.length }],
+          },
+        },
+      ],
+    })
+  )
   fs.writeFileSync(
     path.join(dir, 'lists-manifest.json'),
     JSON.stringify({
@@ -170,6 +218,8 @@ describe('lake source over list-edges files', () => {
 
   test('without a manifest every file under lake/ is read', async () => {
     expect(withoutManifest.stats().run).toBeUndefined()
+    expect(withoutManifest.stats().relations).toBeUndefined()
+    expect((await withoutManifest.source({ authors: [C], kinds: [1984] })).size).toBe(0)
     const events = byPubkey(await withoutManifest.source({ authors: [A, B], kinds: [3] }))
     expect([...events.keys()].sort()).toEqual([A, B])
   })
@@ -181,6 +231,53 @@ describe('lake source over list-edges files', () => {
     const source = await createLakeSource({ dir: bare, threads: 1 })
     await source.close()
     expect((await source.source({ authors: [A], kinds: [3] })).size).toBe(0)
+  })
+})
+
+describe('lake source over relation-edges files', () => {
+  test('the relations manifest names the files, the run and the declared relations', () => {
+    const relations = withManifest.stats().relations!
+    expect(relations.run).toBe('8a5a4d8645f55176')
+    expect(relations.referenceTime).toBe(1791417674)
+    expect(relations.files).toBe(1)
+    expect(relations.rows).toBe(ACTS.length)
+    expect(relations.declared.map((r) => [r.name, r.interpreter, r.kind])).toEqual([
+      ['report', 'nostr-1984', 1984],
+      ['reaction', 'nostr-7', 7],
+    ])
+  })
+
+  test('one synthesised kind 1984 event per reporter, the type at tag[2], none where untyped', async () => {
+    const events = [...(await withManifest.source({ authors: [C], kinds: [1984] }))]
+    expect(events.length).toBe(1)
+    const [event] = events
+    expect(event.pubkey).toBe(C)
+    expect(event.kind).toBe(1984)
+    expect(event.id).toMatch(/^[0-9a-f]{64}$/)
+    expect(event.created_at).toBe(1700000300) // the latest act
+    expect(event.tags.map((t) => t.join(' ')).sort()).toEqual([`p ${A}`, `p ${A} spam`, `p ${B} nudity`].sort())
+    expect(event.content).toBe('')
+  })
+
+  test('reactions are kind 7 events with one p tag per reacted author', async () => {
+    const events = [...(await withManifest.source({ authors: [B], kinds: [7] }))]
+    expect(events.length).toBe(1)
+    expect(events[0].kind).toBe(7)
+    expect(events[0].created_at).toBe(1700000030)
+    expect(events[0].tags.map((t) => t[1]).sort()).toEqual([A, C])
+    expect((await withManifest.source({ authors: [A], kinds: [7] })).size).toBe(0) // A reacted to nobody
+  })
+
+  test('lists and acts can be asked for in one filter', async () => {
+    const events = await withManifest.source({ authors: [B], kinds: [3, 7] })
+    expect([...events].map((e) => e.kind).sort((x, y) => x - y)).toEqual([3, 7])
+    for (const event of events) expect(event.pubkey).toBe(B)
+  })
+
+  test('the same event id comes back every time for one reporter and run', async () => {
+    const [first] = [...(await withManifest.source({ authors: [C], kinds: [1984] }))]
+    const [again] = [...(await withManifest.source({ authors: [C], kinds: [1984] }))]
+    expect(again.id).toBe(first.id)
   })
 })
 
@@ -225,5 +322,33 @@ describe('GrapeRank crawling the lake through the switch', () => {
     expect(ranked.has(B)).toBe(true)
     expect(ranked.has(C)).toBe(true)
     expect(ranked.get(B)!.rank).toBeGreaterThan(0)
+  })
+
+  test('follows, then reports and reactions over the actors found: typed report values, reaction ratings', async () => {
+    NostrInterpreterClass.relays = []
+    setEventSource(withManifest.source)
+    const controller = new InterpretationController(new InterpretersMap([InterpreterFactory]), async () => true)
+    const output = await controller.interpret({
+      type: 'p',
+      pov: [A],
+      requests: [
+        { id: 'nostr-3', iterate: 2 },
+        { id: 'nostr-1984', params: { spam: -1, nudity: -0.5 } as any },
+        { id: 'nostr-7' },
+      ],
+    })
+    expect(output).toBeDefined()
+    const by = (id: string) =>
+      (output!.interactions as InteractionsList)
+        .filter((i) => i.interpreterId === id)
+        .map((i) => `${i.actor}>${i.subject}=${i.value}`)
+        .sort()
+    // C (found by the follow crawl) reported A as spam and B as nudity: the
+    // typed values from the request; A's untyped report is a repeat of the
+    // same subject and is dropped by the interpreter
+    expect(by('nostr-1984')).toEqual([`${C}>${A}=-1`, `${C}>${B}=-0.5`].sort())
+    // B reacted to A and C: the reaction interpreter's default value
+    expect(by('nostr-7')).toEqual([`${B}>${A}=1`, `${B}>${C}=1`].sort())
+    expect(by('nostr-3').length).toBe(3)
   })
 })

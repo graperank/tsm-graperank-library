@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -17,6 +18,16 @@ import type { NostrEventSource } from '../event-source'
  * nothing else. The lake validated the events when it was built; nothing is
  * re-checked here.
  *
+ * Act relations (reports, reactions) come the same way from the lake's
+ * `nas/derivation/interactions/relation-edges/source` files, one edge per
+ * (relation, actor, target, attr) with a count and time span. The relations
+ * manifest (`nas fetch-relations`) carries each relation's declaration from
+ * nas-py's `relations.toml`: the interpreter it answers, the event kind, and
+ * the tags of the synthesised event with `{target}` and `{attr}` substituted
+ * (a report's type lands at tag[2], where the reports interpreter reads it).
+ * One event per (actor, relation): its id is a hash of relation, actor and
+ * run; its created_at the latest act.
+ *
  * GrapeRank fires its 500-author chunks concurrently, so calls are queued and
  * served one query at a time over the union of their authors, and each call
  * gets back only the events of the authors it asked for.
@@ -32,6 +43,8 @@ export type LakeSourceOptions = {
   files?: string[]
   /** The lists manifest to read the file list and run from; default `<dir>/lists-manifest.json`. */
   manifest?: string
+  /** The relations manifest (act relations: reports, reactions); default `<dir>/relations-manifest.json`, read if present. */
+  relationsManifest?: string
   /** Fetch the manifest's files from `<baseUrl>/<sha256>` instead of `<dir>/lake`, e.g. a `nas serve` URL. */
   baseUrl?: string
   /** Kinds the files hold; default 3 and 10000. */
@@ -46,12 +59,21 @@ export type LakeSourceOptions = {
   inlineLimit?: number
 }
 
+export type LakeRelation = {
+  name: string
+  interpreter: string
+  kind: number
+  tags: string[][]
+}
+
 export type LakeSourceStats = {
   files: number
   /** Rows according to the manifest; undefined without one. */
   rows: number | undefined
   run: string | undefined
   referenceTime: number | undefined
+  /** The act relations served, with their run; undefined without a relations manifest. */
+  relations: { run: string | undefined; referenceTime: number | undefined; files: number; rows: number | undefined; declared: LakeRelation[] } | undefined
   /** Calls to the source, queries run (fewer, when calls were batched). */
   calls: number
   queries: number
@@ -89,12 +111,58 @@ function readManifest(file: string): { run?: string; referenceTime?: number; fil
   return { run: run.run, referenceTime: run.reference_time, files }
 }
 
+type RelationsManifest = {
+  run?: string
+  referenceTime?: number
+  files: ManifestFile[]
+  relations: LakeRelation[]
+}
+
+function readRelationsManifest(file: string): RelationsManifest | undefined {
+  if (!fs.existsSync(file)) return undefined
+  const document = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const run = document.runs?.[document.runs.length - 1]
+  if (!run) return undefined
+  const files: ManifestFile[] = (run.files?.source ?? []).map((f: ManifestFile) => ({ sha256: f.sha256, rows: f.rows }))
+  const relations: LakeRelation[] = Object.entries(run.relations ?? {})
+    .map(([name, entry]: [string, any]) => ({
+      name,
+      interpreter: String(entry?.graperank?.interpreter ?? ''),
+      kind: Number(entry?.graperank?.kind),
+      tags: (entry?.graperank?.tags ?? []) as string[][],
+    }))
+    .filter((r) => r.interpreter && Number.isInteger(r.kind) && r.tags.length)
+  return { run: run.run, referenceTime: run.reference_time, files, relations }
+}
+
 function quote(text: string): string {
   return "'" + text.replace(/'/g, "''") + "'"
 }
 
+function sumRows(files: ManifestFile[]): number | undefined {
+  return files.every((f) => typeof f.rows === 'number') ? files.reduce((sum, f) => sum + (f.rows as number), 0) : undefined
+}
+
+/** A relation's tag template filled for one edge; from `{attr}` on, elements are dropped when the edge has no attr. */
+function fillTags(template: string[][], target: string, attr: string | null): string[][] {
+  const tags: string[][] = []
+  for (const tag of template) {
+    const filled: string[] = []
+    for (const element of tag) {
+      if (element === '{attr}') {
+        if (attr === null || attr === undefined) break
+        filled.push(attr)
+      } else {
+        filled.push(element.replace('{target}', target))
+      }
+    }
+    tags.push(filled)
+  }
+  return tags
+}
+
 export async function createLakeSource(options: LakeSourceOptions): Promise<LakeSource> {
-  const supported = options.kinds ?? [3, 10000]
+  const listSupported = options.kinds ?? [3, 10000]
   const inlineLimit = options.inlineLimit ?? 32
 
   // The files, and what the manifest says about them
@@ -125,9 +193,29 @@ export async function createLakeSource(options: LakeSourceOptions): Promise<Lake
         .filter((file) => fs.statSync(file).isFile())
     }
   }
-  if (!files.length) throw new Error('createLakeSource: no edge files')
-  const remote = files.some((f) => /^(https?|s3):\/\//.test(f))
-  for (const file of files) {
+  // Act relations, when a relations manifest is there
+  let relationFiles: string[] = []
+  let relations: LakeRelation[] = []
+  let relationsRun: RelationsManifest | undefined
+  if (options.dir || options.relationsManifest) {
+    relationsRun = readRelationsManifest(options.relationsManifest ?? path.join(options.dir!, 'relations-manifest.json'))
+    if (relationsRun) {
+      relations = relationsRun.relations
+      relationFiles = relationsRun.files.map((f) =>
+        options.baseUrl ? `${options.baseUrl.replace(/\/$/, '')}/${f.sha256}` : path.join(options.dir!, 'lake', f.sha256)
+      )
+    }
+  }
+  const byKind = new Map<number, LakeRelation[]>()
+  for (const relation of relations) {
+    const held = byKind.get(relation.kind)
+    if (held) held.push(relation)
+    else byKind.set(relation.kind, [relation])
+  }
+  const actKinds = [...byKind.keys()]
+  if (!files.length && !relationFiles.length) throw new Error('createLakeSource: no edge files')
+  const remote = [...files, ...relationFiles].some((f) => /^(https?|s3):\/\//.test(f))
+  for (const file of [...files, ...relationFiles]) {
     if (!/^(https?|s3):\/\//.test(file) && !fs.existsSync(file)) throw new Error(`createLakeSource: missing ${file}`)
   }
 
@@ -147,15 +235,25 @@ export async function createLakeSource(options: LakeSourceOptions): Promise<Lake
       await conn.run('INSTALL httpfs; LOAD httpfs')
     }
   }
-  await conn.run(
-    `CREATE VIEW edges AS SELECT source, target, kind, list_id, list_created_at FROM read_parquet([${files.map(quote).join(', ')}])`
-  )
+  if (files.length) {
+    await conn.run(
+      `CREATE VIEW edges AS SELECT source, target, kind, list_id, list_created_at FROM read_parquet([${files.map(quote).join(', ')}])`
+    )
+  }
+  if (relationFiles.length) {
+    await conn.run(
+      `CREATE VIEW acts AS SELECT source, target, relation, attr, count, first_at, last_at FROM read_parquet([${relationFiles.map(quote).join(', ')}])`
+    )
+  }
 
   const stats: LakeSourceStats = {
     files: files.length,
     rows,
     run,
     referenceTime,
+    relations: relationsRun
+      ? { run: relationsRun.run, referenceTime: relationsRun.referenceTime, files: relationFiles.length, rows: sumRows(relationsRun.files), declared: relations }
+      : undefined,
     calls: 0,
     queries: 0,
     queryMs: 0,
@@ -174,12 +272,18 @@ export async function createLakeSource(options: LakeSourceOptions): Promise<Lake
     return text
   }
 
-  // One query for a batch of calls: events of every requested kind, by author
+  // One query per batch of calls and table: events of every requested kind, by author
   async function query(authors: string[], kinds: number[]): Promise<Map<string, NostrEvent[]>> {
     const byAuthor = new Map<string, NostrEvent[]>()
     const started = Date.now()
     let converting = 0
     stats.queries++
+    const add = (event: NostrEvent) => {
+      const held = byAuthor.get(event.pubkey)
+      if (held) held.push(event)
+      else byAuthor.set(event.pubkey, [event])
+      stats.events++
+    }
     try {
       let predicate: string
       if (authors.length <= inlineLimit) {
@@ -195,35 +299,70 @@ export async function createLakeSource(options: LakeSourceOptions): Promise<Lake
         appender.closeSync()
         predicate = 'source IN (SELECT pubkey FROM frontier)'
       }
-      const sql = `SELECT lower(hex(source)) AS pubkey, kind, lower(hex(list_id)) AS id,
-                          CAST(list_created_at AS DOUBLE) AS created_at,
-                          list(lower(hex(target))) AS targets
-                   FROM edges WHERE kind IN (${kinds.join(', ')}) AND ${predicate}
-                   GROUP BY ALL`
-      const result = await conn.stream(sql)
-      for (;;) {
-        const chunk = await result.fetchChunk()
-        if (!chunk || chunk.rowCount === 0) break
-        const t0 = Date.now()
-        for (const row of chunk.getRows() as any[][]) {
-          const pubkey = intern(row[0] as string)
-          const targets = (row[4]?.items ?? []) as string[]
-          const event: NostrEvent = {
-            id: row[2] as string,
-            pubkey,
-            kind: Number(row[1]),
-            created_at: Number(row[3]),
-            tags: targets.map((t) => ['p', intern(t)]),
-            content: '',
-            sig: '',
+      const listKinds = kinds.filter((k) => listSupported.includes(k))
+      if (listKinds.length && files.length) {
+        const sql = `SELECT lower(hex(source)) AS pubkey, kind, lower(hex(list_id)) AS id,
+                            CAST(list_created_at AS DOUBLE) AS created_at,
+                            list(lower(hex(target))) AS targets
+                     FROM edges WHERE kind IN (${listKinds.join(', ')}) AND ${predicate}
+                     GROUP BY ALL`
+        const result = await conn.stream(sql)
+        for (;;) {
+          const chunk = await result.fetchChunk()
+          if (!chunk || chunk.rowCount === 0) break
+          const t0 = Date.now()
+          for (const row of chunk.getRows() as any[][]) {
+            const targets = (row[4]?.items ?? []) as string[]
+            add({
+              id: row[2] as string,
+              pubkey: intern(row[0] as string),
+              kind: Number(row[1]),
+              created_at: Number(row[3]),
+              tags: targets.map((t) => ['p', intern(t)]),
+              content: '',
+              sig: '',
+            })
+            stats.edges += targets.length
           }
-          const held = byAuthor.get(pubkey)
-          if (held) held.push(event)
-          else byAuthor.set(pubkey, [event])
-          stats.events++
-          stats.edges += targets.length
+          converting += Date.now() - t0
         }
-        converting += Date.now() - t0
+      }
+      const wanted = kinds.filter((k) => byKind.has(k)).flatMap((k) => byKind.get(k)!)
+      if (wanted.length && relationFiles.length) {
+        const sql = `SELECT lower(hex(source)) AS pubkey, relation,
+                            list(lower(hex(target))) AS targets, list(attr) AS attrs,
+                            CAST(max(last_at) AS DOUBLE) AS created_at
+                     FROM acts WHERE relation IN (${wanted.map((r) => quote(r.name)).join(', ')}) AND ${predicate}
+                     GROUP BY ALL`
+        const result = await conn.stream(sql)
+        for (;;) {
+          const chunk = await result.fetchChunk()
+          if (!chunk || chunk.rowCount === 0) break
+          const t0 = Date.now()
+          for (const row of chunk.getRows() as any[][]) {
+            const pubkey = intern(row[0] as string)
+            const name = row[1] as string
+            const targets = (row[2]?.items ?? []) as string[]
+            const attrs = (row[3]?.items ?? []) as (string | null)[]
+            for (const relation of wanted.filter((r) => r.name === name)) {
+              const tags: string[][] = []
+              for (let i = 0; i < targets.length; i++) {
+                for (const tag of fillTags(relation.tags, intern(targets[i]), attrs[i] ?? null)) tags.push(tag)
+              }
+              add({
+                id: createHash('sha256').update(`${name}:${pubkey}:${relationsRun?.run ?? ''}`).digest('hex'),
+                pubkey,
+                kind: relation.kind,
+                created_at: Number(row[4]),
+                tags,
+                content: '',
+                sig: '',
+              })
+              stats.edges += targets.length
+            }
+          }
+          converting += Date.now() - t0
+        }
       }
     } catch (error) {
       stats.errors++
@@ -274,7 +413,7 @@ export async function createLakeSource(options: LakeSourceOptions): Promise<Lake
       if (!FILTER_KEYS.has(key) && (filter as any)[key] !== undefined) return Promise.resolve(new Set<NostrEvent>())
     }
     const authors = [...new Set((filter.authors ?? []).filter((a) => HEX64.test(a)).map((a) => a.toLowerCase()))]
-    const kinds = (filter.kinds ?? []).filter((k) => supported.includes(k))
+    const kinds = (filter.kinds ?? []).filter((k) => listSupported.includes(k) || actKinds.includes(k))
     if (closed || !authors.length || !kinds.length) return Promise.resolve(new Set<NostrEvent>())
     return new Promise<Set<NostrEvent>>((resolve) => {
       pending.push({ authors, kinds, resolve })
