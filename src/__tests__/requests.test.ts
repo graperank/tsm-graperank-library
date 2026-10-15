@@ -190,6 +190,31 @@ describe('TSM Request Parser', () => {
       expect(result.configs['custom-param']).toBe('custom-value')
     })
 
+    test('liveNetwork: absent leaves the requests alone; true or false lands on every interpreter request', () => {
+      const tags = (live?: string): string[][] => [
+        ['config', 'type', 'p'],
+        ['config', 'pov', '"npub1test"'],
+        ['config', 'interpreters', '[{"id":"nostr-3","iterate":2},{"id":"nostr-1984"},{"id":"nostr-7","liveNetwork":true}]'],
+        ...(live === undefined ? [] : [['config', 'liveNetwork', live]]),
+      ]
+      const absent = parseServiceRequest({ ...baseRequestEvent, tags: tags() })
+      expect(absent.configs.liveNetwork).toBeUndefined()
+      expect(absent.interpretationInput.requests.map(r => r.liveNetwork)).toEqual([undefined, undefined, true])
+
+      const live = parseServiceRequest({ ...baseRequestEvent, tags: tags('true') })
+      expect(live.configs.liveNetwork).toBe(true)
+      expect(live.interpretationInput.requests.map(r => r.liveNetwork)).toEqual([true, true, true])
+      expect(live.configs['liveNetwork']).toBe(true) // a boolean, not the raw string
+
+      const archive = parseServiceRequest({ ...baseRequestEvent, tags: tags('false') })
+      expect(archive.configs.liveNetwork).toBe(false)
+      // a request's own value is kept
+      expect(archive.interpretationInput.requests.map(r => r.liveNetwork)).toEqual([false, false, true])
+
+      expect(parseServiceRequest({ ...baseRequestEvent, tags: tags('1') }).configs.liveNetwork).toBe(true)
+      expect(parseServiceRequest({ ...baseRequestEvent, tags: tags('yes') }).configs.liveNetwork).toBe(false)
+    })
+
     test('should accept pov as string or array', () => {
       const stringPovEvent: NostrEvent = {
         ...baseRequestEvent,

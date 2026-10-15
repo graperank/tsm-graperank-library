@@ -19,6 +19,9 @@ export type ServiceRequestConfigs = {
   rigor?: number
   precision?: number
   interpreters?: InterpreterRequest<any>[]
+  // true forces the live network (relays) for every interpreter; false or absent
+  // lets each interpreter read the service's archive first when it holds its events
+  liveNetwork?: boolean
   [key: string]: any
 }
 
@@ -138,10 +141,20 @@ export function parseServiceRequest(
     )
   }
   
+  const liveNetworkValue = getConfigTag(event.tags, 'liveNetwork')
+  if (liveNetworkValue !== undefined) {
+    configs.liveNetwork = ['true', '1'].includes(liveNetworkValue.trim().toLowerCase())
+    // carried on each interpreter request, where the interpreter reads it; a
+    // request that sets its own value keeps it
+    configs.interpreters = configs.interpreters.map(request =>
+      request.liveNetwork === undefined ? { ...request, liveNetwork: configs.liveNetwork } : request
+    )
+  }
+
   event.tags.forEach(tag => {
     if (tag[0] === 'config' && tag[1] && tag[2]) {
       const key = tag[1]
-      if (!['type', 'pov', 'minrank', 'attenuation', 'rigor', 'precision', 'interpreters'].includes(key)) {
+      if (!['type', 'pov', 'minrank', 'attenuation', 'rigor', 'precision', 'interpreters', 'liveNetwork'].includes(key)) {
         configs[key] = tag[2]
       }
     }

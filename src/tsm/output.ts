@@ -48,8 +48,21 @@ export async function executeServiceRequest(
   const { interpretationInput, calculatorParams } = parsedRequest
 
   const metrics = new MetricsCollector(requestEvent.id)
+  const interpretersMap = new InterpretersMap([InterpreterFactory])
 
+  // Each interpreter chooses the archive or the relays once per request
+  // (nostr-interpreters/event-source.ts) and records it on itself. The
+  // controller clears its interpreters when it is done, so the choice is read
+  // here, on the first status of each interpreter, and told whatever the
+  // verbosity: it says which data a ranking came from.
   const onInterpreterStatus = async (status: InterpreterStatus): Promise<boolean> => {
+    const choice = (interpretersMap.get(status.interpreterId) as { eventSource?: { source: string; reason: string } } | undefined)?.eventSource
+    if (choice && !metrics.getMetrics().sources?.[status.interpreterId]) {
+      metrics.setSource(status.interpreterId, choice)
+      const note = `Interpreter ${status.interpreterId} reads from ${choice.source} (${choice.reason})`
+      console.log(`GrapeRank : service : ${note}`)
+      if (callbacks?.onFeedbackEvent) await sendFeedback(requestEvent, 'info', note, callbacks.onFeedbackEvent)
+    }
     if (verboseFeedback && callbacks?.onFeedbackEvent) {
       const fetchProgressMessage = status.fetchProgress
         ? `, fetch progress ${status.fetchProgress.processedActors}/${status.fetchProgress.totalActors} actors`
@@ -89,7 +102,6 @@ export async function executeServiceRequest(
 
     metrics.startPhase('interpretation')
 
-    const interpretersMap = new InterpretersMap([InterpreterFactory])
     const interpretationController = new InterpretationController(
       interpretersMap,
       onInterpreterStatus,

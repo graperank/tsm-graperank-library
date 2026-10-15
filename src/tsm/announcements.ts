@@ -1,4 +1,5 @@
 import { InterpreterFactory } from '../nostr-interpreters/factory'
+import { getArchive } from '../nostr-interpreters/event-source'
 import { InterpreterRequest } from '../graperank/types'
 import { UnsignedEvent, ServiceAnnouncementConfig } from './types'
 
@@ -141,6 +142,20 @@ export function generateServiceAnnouncement(
     tags.push(['V', 'page', 'integer', 'Page number for paginated results'])
   }
   
+  // The archive-first mode every service built on this library has: the
+  // request's liveNetwork config, and the archive registered in this process
+  tags.push([
+    'config',
+    'liveNetwork',
+    'boolean',
+    'true fetches every interpreter from the live network (relays); false or absent reads the service archive first, per interpreter, when it holds the events',
+    'false',
+  ])
+  const archive = getArchive()
+  if (archive) {
+    tags.push(['info', 'archive', archive.describe()])
+  }
+
   if (config.customConfigs) {
     config.customConfigs.forEach(cfg => {
       const tag = ['config', cfg.key, cfg.valueType, cfg.description, cfg.defaultValue]
