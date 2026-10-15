@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { NostrEvent, NostrFilter } from '../../lib/nostr-tools'
-import type { NostrEventSource } from '../event-source'
+import type { NostrEventArchive, NostrEventSource } from '../event-source'
 
 /**
  * An event source over the nas lake's follow and mute edges.
@@ -32,12 +32,23 @@ import type { NostrEventSource } from '../event-source'
  * served one query at a time over the union of their authors, and each call
  * gets back only the events of the authors it asked for.
  *
+ * The lake is read where it is served: `url` names a lake URL that serves
+ * `<url>/<sha256>` by range and the manifests at `<url>/lists-manifest.json`
+ * and `<url>/relations-manifest.json` (nas-py's `docs/notes/lake-url-manifests.org`;
+ * Caddy on the DO lake, `nas serve` in development). A directory copy
+ * (`dir`) is the same layout on disk, for tests and local copies.
+ *
+ * The source is also an archive (event-source.ts): `covers` says which kinds
+ * it holds, `ping` whether it is there, `describe` which runs it serves.
+ *
  * DuckDB (`@duckdb/node-api`, an optional peer dependency) does the reading;
  * it is loaded only when a source is created.
  */
 
 export type LakeSourceOptions = {
-  /** Directory with `lake/<sha256>` files and, if present, `lists-manifest.json`. */
+  /** A lake URL: files at `<url>/<sha256>`, manifests at `<url>/lists-manifest.json` and `<url>/relations-manifest.json`. */
+  url?: string
+  /** Directory with `lake/<sha256>` files and, if present, `lists-manifest.json` and `relations-manifest.json`. */
   dir?: string
   /** Explicit file paths or URLs; replaces the directory listing. */
   files?: string[]
@@ -45,8 +56,10 @@ export type LakeSourceOptions = {
   manifest?: string
   /** The relations manifest (act relations: reports, reactions); default `<dir>/relations-manifest.json`, read if present. */
   relationsManifest?: string
-  /** Fetch the manifest's files from `<baseUrl>/<sha256>` instead of `<dir>/lake`, e.g. a `nas serve` URL. */
+  /** With `dir`: fetch the manifests' files from `<baseUrl>/<sha256>` instead of `<dir>/lake` (manifests still from `dir`). */
   baseUrl?: string
+  /** Milliseconds a manifest fetch or a ping may take; default 10000. */
+  timeoutMs?: number
   /** Kinds the files hold; default 3 and 10000. */
   kinds?: number[]
   /** DuckDB threads; default DuckDB's choice. */
@@ -67,6 +80,10 @@ export type LakeRelation = {
 }
 
 export type LakeSourceStats = {
+  /** The lake URL, or the directory. */
+  where: string
+  /** Event kinds this lake answers: the list kinds when list files are there, plus the declared act kinds. */
+  kinds: number[]
   files: number
   /** Rows according to the manifest; undefined without one. */
   rows: number | undefined
@@ -85,8 +102,7 @@ export type LakeSourceStats = {
   errors: number
 }
 
-export type LakeSource = {
-  source: NostrEventSource
+export type LakeSource = NostrEventArchive & {
   close(): Promise<void>
   stats(): LakeSourceStats
 }
@@ -102,10 +118,15 @@ type Call = {
 
 type ManifestFile = { sha256: string; rows?: number }
 
-function readManifest(file: string): { run?: string; referenceTime?: number; files: ManifestFile[] } | undefined {
+type ListsManifest = { run?: string; referenceTime?: number; files: ManifestFile[] }
+
+function readManifest(file: string): ListsManifest | undefined {
   if (!fs.existsSync(file)) return undefined
-  const document = JSON.parse(fs.readFileSync(file, 'utf8'))
-  const run = document.runs?.[document.runs.length - 1]
+  return parseManifest(JSON.parse(fs.readFileSync(file, 'utf8')))
+}
+
+function parseManifest(document: any): ListsManifest | undefined {
+  const run = document?.runs?.[document.runs.length - 1]
   if (!run) return undefined
   const files: ManifestFile[] = (run.edges?.source ?? []).map((f: ManifestFile) => ({ sha256: f.sha256, rows: f.rows }))
   return { run: run.run, referenceTime: run.reference_time, files }
@@ -120,8 +141,11 @@ type RelationsManifest = {
 
 function readRelationsManifest(file: string): RelationsManifest | undefined {
   if (!fs.existsSync(file)) return undefined
-  const document = JSON.parse(fs.readFileSync(file, 'utf8'))
-  const run = document.runs?.[document.runs.length - 1]
+  return parseRelationsManifest(JSON.parse(fs.readFileSync(file, 'utf8')))
+}
+
+function parseRelationsManifest(document: any): RelationsManifest | undefined {
+  const run = document?.runs?.[document.runs.length - 1]
   if (!run) return undefined
   const files: ManifestFile[] = (run.files?.source ?? []).map((f: ManifestFile) => ({ sha256: f.sha256, rows: f.rows }))
   const relations: LakeRelation[] = Object.entries(run.relations ?? {})
@@ -133,6 +157,18 @@ function readRelationsManifest(file: string): RelationsManifest | undefined {
     }))
     .filter((r) => r.interpreter && Number.isInteger(r.kind) && r.tags.length)
   return { run: run.run, referenceTime: run.reference_time, files, relations }
+}
+
+/** A named document from the lake URL: parsed JSON, or undefined when the lake does not serve it (404). */
+async function fetchDocument(url: string, name: string, timeoutMs: number): Promise<any | undefined> {
+  const response = await fetch(`${url}/${name}`, { signal: AbortSignal.timeout(timeoutMs) })
+  if (response.status === 404) return undefined
+  if (!response.ok) throw new Error(`createLakeSource: ${url}/${name} answered ${response.status}`)
+  return response.json()
+}
+
+function when(seconds: number | undefined): string {
+  return seconds === undefined ? 'as of ?' : `as of ${new Date(seconds * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`
 }
 
 function quote(text: string): string {
@@ -164,26 +200,34 @@ function fillTags(template: string[][], target: string, attr: string | null): st
 export async function createLakeSource(options: LakeSourceOptions): Promise<LakeSource> {
   const listSupported = options.kinds ?? [3, 10000]
   const inlineLimit = options.inlineLimit ?? 32
+  const timeoutMs = options.timeoutMs ?? 10000
+  const url = options.url?.replace(/\/$/, '')
+  const fileBase = url ?? options.baseUrl?.replace(/\/$/, '')
+  const locate = (sha256: string): string => (fileBase ? `${fileBase}/${sha256}` : path.join(options.dir!, 'lake', sha256))
 
-  // The files, and what the manifest says about them
+  // The files, and what the manifests say about them
   let files: string[]
   let rows: number | undefined
   let run: string | undefined
   let referenceTime: number | undefined
+  let relationsRun: RelationsManifest | undefined
   if (options.files) {
     files = [...options.files]
+  } else if (url) {
+    const manifest = parseManifest(await fetchDocument(url, 'lists-manifest.json', timeoutMs))
+    run = manifest?.run
+    referenceTime = manifest?.referenceTime
+    rows = manifest ? sumRows(manifest.files) : undefined
+    files = (manifest?.files ?? []).map((f) => locate(f.sha256))
+    relationsRun = parseRelationsManifest(await fetchDocument(url, 'relations-manifest.json', timeoutMs))
   } else {
-    if (!options.dir) throw new Error('createLakeSource: give dir or files')
+    if (!options.dir) throw new Error('createLakeSource: give url, dir or files')
     const manifest = readManifest(options.manifest ?? path.join(options.dir, 'lists-manifest.json'))
     if (manifest) {
       run = manifest.run
       referenceTime = manifest.referenceTime
-      rows = manifest.files.every((f) => typeof f.rows === 'number')
-        ? manifest.files.reduce((sum, f) => sum + (f.rows as number), 0)
-        : undefined
-      files = manifest.files.map((f) =>
-        options.baseUrl ? `${options.baseUrl.replace(/\/$/, '')}/${f.sha256}` : path.join(options.dir!, 'lake', f.sha256)
-      )
+      rows = sumRows(manifest.files)
+      files = manifest.files.map((f) => locate(f.sha256))
     } else {
       const lake = path.join(options.dir, 'lake')
       files = fs
@@ -194,18 +238,11 @@ export async function createLakeSource(options: LakeSourceOptions): Promise<Lake
     }
   }
   // Act relations, when a relations manifest is there
-  let relationFiles: string[] = []
-  let relations: LakeRelation[] = []
-  let relationsRun: RelationsManifest | undefined
-  if (options.dir || options.relationsManifest) {
+  if (!url && (options.dir || options.relationsManifest)) {
     relationsRun = readRelationsManifest(options.relationsManifest ?? path.join(options.dir!, 'relations-manifest.json'))
-    if (relationsRun) {
-      relations = relationsRun.relations
-      relationFiles = relationsRun.files.map((f) =>
-        options.baseUrl ? `${options.baseUrl.replace(/\/$/, '')}/${f.sha256}` : path.join(options.dir!, 'lake', f.sha256)
-      )
-    }
   }
+  const relations: LakeRelation[] = relationsRun?.relations ?? []
+  const relationFiles: string[] = (relationsRun?.files ?? []).map((f) => locate(f.sha256))
   const byKind = new Map<number, LakeRelation[]>()
   for (const relation of relations) {
     const held = byKind.get(relation.kind)
@@ -213,7 +250,8 @@ export async function createLakeSource(options: LakeSourceOptions): Promise<Lake
     else byKind.set(relation.kind, [relation])
   }
   const actKinds = [...byKind.keys()]
-  if (!files.length && !relationFiles.length) throw new Error('createLakeSource: no edge files')
+  const heldKinds = [...(files.length ? listSupported : []), ...actKinds]
+  if (!files.length && !relationFiles.length) throw new Error(`createLakeSource: no edge files at ${url ?? options.dir}`)
   const remote = [...files, ...relationFiles].some((f) => /^(https?|s3):\/\//.test(f))
   for (const file of [...files, ...relationFiles]) {
     if (!/^(https?|s3):\/\//.test(file) && !fs.existsSync(file)) throw new Error(`createLakeSource: missing ${file}`)
@@ -247,6 +285,8 @@ export async function createLakeSource(options: LakeSourceOptions): Promise<Lake
   }
 
   const stats: LakeSourceStats = {
+    where: url ?? options.dir ?? 'files',
+    kinds: heldKinds,
     files: files.length,
     rows,
     run,
@@ -413,7 +453,7 @@ export async function createLakeSource(options: LakeSourceOptions): Promise<Lake
       if (!FILTER_KEYS.has(key) && (filter as any)[key] !== undefined) return Promise.resolve(new Set<NostrEvent>())
     }
     const authors = [...new Set((filter.authors ?? []).filter((a) => HEX64.test(a)).map((a) => a.toLowerCase()))]
-    const kinds = (filter.kinds ?? []).filter((k) => listSupported.includes(k) || actKinds.includes(k))
+    const kinds = (filter.kinds ?? []).filter((k) => heldKinds.includes(k))
     if (closed || !authors.length || !kinds.length) return Promise.resolve(new Set<NostrEvent>())
     return new Promise<Set<NostrEvent>>((resolve) => {
       pending.push({ authors, kinds, resolve })
@@ -431,5 +471,37 @@ export async function createLakeSource(options: LakeSourceOptions): Promise<Lake
     } catch {}
   }
 
-  return { source, close, stats: () => ({ ...stats }) }
+  // The archive side: what is held, whether it is there, what it is
+  function covers(filter: NostrFilter): boolean {
+    for (const key of Object.keys(filter)) {
+      if (!FILTER_KEYS.has(key) && (filter as any)[key] !== undefined) return false
+    }
+    const kinds = filter.kinds ?? []
+    return kinds.length > 0 && kinds.every((k) => heldKinds.includes(k))
+  }
+
+  async function ping(): Promise<boolean> {
+    if (closed) return false
+    if (url) {
+      try {
+        const name = files.length ? 'lists-manifest.json' : 'relations-manifest.json'
+        const response = await fetch(`${url}/${name}`, { method: 'HEAD', signal: AbortSignal.timeout(timeoutMs) })
+        return response.ok
+      } catch {
+        return false
+      }
+    }
+    const first = files[0] ?? relationFiles[0]
+    return /^(https?|s3):\/\//.test(first) ? true : fs.existsSync(first)
+  }
+
+  function describe(): string {
+    const lists = files.length ? `lists run ${run ?? '?'} ${when(referenceTime)}` : 'no lists'
+    const acts = relationsRun
+      ? `relations ${relations.map((r) => r.name).join(',') || 'none'} run ${relationsRun.run ?? '?'} ${when(relationsRun.referenceTime)}`
+      : 'no relations'
+    return `lake ${stats.where}: ${lists}; ${acts}`
+  }
+
+  return { source, covers, ping, describe, close, stats: () => ({ ...stats, kinds: [...stats.kinds] }) }
 }

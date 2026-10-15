@@ -1,4 +1,5 @@
 import * as fs from 'fs'
+import * as http from 'http'
 import * as os from 'os'
 import * as path from 'path'
 import { DuckDBInstance } from '@duckdb/node-api'
@@ -8,7 +9,7 @@ import { InterpretationController, InterpretersMap } from '../graperank/interpre
 import { CalculationController } from '../graperank/calculation'
 import { InterpreterFactory } from '../nostr-interpreters/factory'
 import { NostrInterpreterClass } from '../nostr-interpreters/classes'
-import { setArchive, NostrEventArchive, NostrEventSource } from '../nostr-interpreters/event-source'
+import { setArchive } from '../nostr-interpreters/event-source'
 import { createLakeSource, LakeSource } from '../nostr-interpreters/sources/lake'
 
 // All DuckDB tests live in this one file: the native addon is loaded once per
@@ -51,6 +52,50 @@ const ROWS: [string, string, number, string, number][] = [
 let dir: string
 let withManifest: LakeSource
 let withoutManifest: LakeSource
+let server: http.Server
+let base: string
+let overHttp: LakeSource
+
+/**
+ * A lake URL over `root`, the way Caddy and `nas serve` serve one: `/<sha256>`
+ * by range (HEAD, GET, a single `Range`), the two manifests by name, 404 for
+ * anything else.
+ */
+function serveLake(root: string): Promise<[http.Server, string]> {
+  const named = new Set(['lists-manifest.json', 'relations-manifest.json', 'lake-info.json'])
+  const srv = http.createServer((req, res) => {
+    const name = (req.url ?? '/').slice(1).split('?')[0]
+    const file = /^[0-9a-f]{64}$/.test(name) ? path.join(root, 'lake', name) : named.has(name) ? path.join(root, name) : undefined
+    if (!file || !fs.existsSync(file)) {
+      res.writeHead(404).end('not a file hash')
+      return
+    }
+    const size = fs.statSync(file).size
+    res.setHeader('Accept-Ranges', 'bytes')
+    res.setHeader('Content-Type', named.has(name) ? 'application/json' : 'application/vnd.apache.parquet')
+    const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '')
+    let start = 0
+    let end = size - 1
+    if (range) {
+      if (range[1] === '') start = Math.max(0, size - Number(range[2]))
+      else {
+        start = Number(range[1])
+        if (range[2] !== '') end = Math.min(Number(range[2]), size - 1)
+      }
+      res.statusCode = 206
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`)
+    }
+    res.setHeader('Content-Length', end - start + 1)
+    if (req.method === 'HEAD') {
+      res.end()
+      return
+    }
+    fs.createReadStream(file, { start, end }).pipe(res)
+  })
+  return new Promise((resolve) =>
+    srv.listen(0, '127.0.0.1', () => resolve([srv, `http://127.0.0.1:${(srv.address() as any).port}`]))
+  )
+}
 
 async function writeFixture(file: string): Promise<void> {
   const instance = await DuckDBInstance.create(':memory:', { threads: '1' })
@@ -132,12 +177,16 @@ beforeAll(async () => {
   fs.mkdirSync(path.join(bare, 'lake'))
   fs.copyFileSync(path.join(dir, 'lake', FILE_SHA), path.join(bare, 'lake', FILE_SHA))
   withoutManifest = await createLakeSource({ dir: bare, threads: 2 })
+  ;[server, base] = await serveLake(dir)
+  overHttp = await createLakeSource({ url: base, threads: 2 })
 })
 
 afterAll(async () => {
   setArchive(undefined)
   await withManifest?.close()
   await withoutManifest?.close()
+  await overHttp?.close()
+  server?.close()
 })
 
 function byPubkey(events: Set<NostrEvent>): Map<string, NostrEvent> {
@@ -151,6 +200,9 @@ describe('lake source over list-edges files', () => {
     expect(stats.rows).toBe(ROWS.length)
     expect(stats.run).toBe('0bdc3fea3e667c39')
     expect(stats.referenceTime).toBe(1791417674)
+    expect(stats.where).toBe(dir)
+    expect(stats.kinds).toEqual([3, 10000, 1984, 7])
+    expect(withoutManifest.stats().kinds).toEqual([3, 10000])
   })
 
   test('one synthesised kind 3 event per author, p tags from the edges, id and time from the list', async () => {
@@ -281,24 +333,73 @@ describe('lake source over relation-edges files', () => {
   })
 })
 
-/** The lake as an archive that holds `kinds`, until createLakeSource says so itself. */
-function archiveOf(source: NostrEventSource, kinds: number[]): NostrEventArchive {
-  return {
-    source,
-    covers: (filter) => (filter.kinds ?? []).every((k) => kinds.includes(k)),
-    ping: async () => true,
-    describe: () => 'test lake',
-  }
-}
+describe('the lake as an archive: what it holds, whether it is there, what it is', () => {
+  test('covers: the held kinds with a filter it understands, nothing else', () => {
+    expect(withManifest.covers({ authors: [A], kinds: [3] })).toBe(true)
+    expect(withManifest.covers({ authors: [A], kinds: [3, 10000, 1984, 7], limit: 10 })).toBe(true)
+    expect(withManifest.covers({ authors: [A], kinds: [3, 1] })).toBe(false) // one kind not held
+    expect(withManifest.covers({ authors: [A], kinds: [] })).toBe(false)
+    expect(withManifest.covers({ authors: [A], kinds: [3], '#d': ['x'] })).toBe(false) // a key the lake cannot answer
+    expect(withoutManifest.covers({ authors: [A], kinds: [1984] })).toBe(false) // no relations manifest
+  })
+
+  test('ping and describe', async () => {
+    expect(await withManifest.ping()).toBe(true)
+    expect(withManifest.describe()).toBe(
+      `lake ${dir}: lists run 0bdc3fea3e667c39 as of 2026-10-08 00:01 UTC; relations report,reaction run 8a5a4d8645f55176 as of 2026-10-08 00:01 UTC`
+    )
+    expect(withoutManifest.describe()).toBe(`lake ${withoutManifest.stats().where}: lists run ? as of ?; no relations`)
+    const closed = await createLakeSource({ dir, threads: 1 })
+    await closed.close()
+    expect(await closed.ping()).toBe(false)
+  })
+})
+
+describe('lake source over a lake URL', () => {
+  test('the manifests and files come from the URL; stats say so', () => {
+    const stats = overHttp.stats()
+    expect(stats.where).toBe(base)
+    expect(stats.run).toBe('0bdc3fea3e667c39')
+    expect(stats.rows).toBe(ROWS.length)
+    expect(stats.relations?.run).toBe('8a5a4d8645f55176')
+    expect(stats.kinds).toEqual([3, 10000, 1984, 7])
+    expect(overHttp.describe()).toContain(`lake ${base}: lists run 0bdc3fea3e667c39`)
+  })
+
+  test('the same answers as the directory copy, read by range over HTTP', async () => {
+    const local = byPubkey(await withManifest.source({ authors: [A, B, C], kinds: [3, 10000, 1984, 7] }))
+    const remote = byPubkey(await overHttp.source({ authors: [A, B, C], kinds: [3, 10000, 1984, 7] }))
+    expect([...remote.keys()].sort()).toEqual([...local.keys()].sort())
+    for (const [pubkey, event] of local) expect(remote.get(pubkey)).toEqual(event)
+  })
+
+  test('ping is a HEAD on the lists manifest: true while served, false once the server is gone', async () => {
+    expect(await overHttp.ping()).toBe(true)
+    const [gone, goneBase] = await serveLake(dir)
+    const source = await createLakeSource({ url: goneBase, threads: 1, timeoutMs: 1000 })
+    await new Promise<void>((resolve) => gone.close(() => resolve()))
+    expect(await source.ping()).toBe(false)
+    await source.close()
+  })
+
+  test('a URL without the manifests is not a lake', async () => {
+    const [empty, emptyBase] = await serveLake(fs.mkdtempSync(path.join(os.tmpdir(), 'graperank-lake-empty-')))
+    await expect(createLakeSource({ url: emptyBase, threads: 1 })).rejects.toThrow('no edge files')
+    empty.close()
+  })
+})
 
 describe('GrapeRank crawling the lake through the archive', () => {
   test('nostr-3 at two hops from A: ratings, frontiers and a calculation', async () => {
     NostrInterpreterClass.relays = []
     const seen: string[][] = []
-    setArchive(archiveOf(async (filter) => {
-      seen.push([...(filter.authors ?? [])].sort())
-      return withManifest.source(filter)
-    }, [3]))
+    setArchive({
+      ...withManifest,
+      source: async (filter) => {
+        seen.push([...(filter.authors ?? [])].sort())
+        return withManifest.source(filter)
+      },
+    })
     const statuses: InterpreterStatus[] = []
     const controller = new InterpretationController(
       new InterpretersMap([InterpreterFactory]),
@@ -336,7 +437,7 @@ describe('GrapeRank crawling the lake through the archive', () => {
 
   test('follows, then reports and reactions over the actors found: typed report values, reaction ratings', async () => {
     NostrInterpreterClass.relays = []
-    setArchive(archiveOf(withManifest.source, [3, 10000, 1984, 7]))
+    setArchive(withManifest)
     const controller = new InterpretationController(new InterpretersMap([InterpreterFactory]), async () => true)
     const output = await controller.interpret({
       type: 'p',
@@ -360,5 +461,39 @@ describe('GrapeRank crawling the lake through the archive', () => {
     // B reacted to A and C: the reaction interpreter's default value
     expect(by('nostr-7')).toEqual([`${B}>${A}=1`, `${B}>${C}=1`].sort())
     expect(by('nostr-3').length).toBe(3)
+  })
+
+  test('one request, two choices: follows from the archive, reactions from the relays when the lake holds none', async () => {
+    NostrInterpreterClass.relays = []
+    setArchive(withoutManifest) // lists only: no relations manifest, so no reactions
+    // the controller clears its interpreters when it is done, so the choice is
+    // read while the run is on, from the status callback (as the service does)
+    const interpreters = new InterpretersMap([InterpreterFactory])
+    const choices = new Map<string, unknown>()
+    const controller = new InterpretationController(interpreters, async (status) => {
+      choices.set(status.interpreterId, (interpreters.get(status.interpreterId) as NostrInterpreterClass<any>).eventSource)
+      return true
+    })
+    const output = await controller.interpret({ type: 'p', pov: [A], requests: [{ id: 'nostr-3', iterate: 2 }, { id: 'nostr-7' }] })
+    expect(output).toBeDefined()
+    expect(choices.get('nostr-3')).toEqual({ source: 'archive', reason: withoutManifest.describe() })
+    expect(choices.get('nostr-7')).toEqual({ source: 'relays', reason: 'not held' })
+    const by = (id: string) => (output!.interactions as InteractionsList).filter((i) => i.interpreterId === id)
+    expect(by('nostr-3').length).toBe(3)
+    expect(by('nostr-7')).toEqual([]) // the relays are empty here
+
+    // liveNetwork on a request sends that interpreter to the relays even though the lake holds its kind
+    const live = new InterpretersMap([InterpreterFactory])
+    let liveChoice: unknown
+    const liveOutput = await new InterpretationController(live, async (status) => {
+      liveChoice = (live.get(status.interpreterId) as NostrInterpreterClass<any>).eventSource
+      return true
+    }).interpret({
+      type: 'p',
+      pov: [A],
+      requests: [{ id: 'nostr-3', iterate: 2, liveNetwork: true }],
+    })
+    expect(liveChoice).toEqual({ source: 'relays', reason: 'liveNetwork' })
+    expect(liveOutput!.interactions.length).toBe(0)
   })
 })
