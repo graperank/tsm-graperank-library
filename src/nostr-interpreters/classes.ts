@@ -903,8 +903,8 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     if(!filter.authors || !filter.authors.length)
       return new Promise((resolve,reject)=> reject("No authors provided"))
     const relays = NostrInterpreterClass.relays
-    console.log("GrapeRank : nostr interpreter : fetching events in request ",iteration, " for ",filter.authors?.length, " actors from relays:", relays, "relays length:", relays.length, "relays JSON:", JSON.stringify(relays))
     const archive = this.eventSource?.source === 'archive' ? getArchive()?.source : undefined
+    console.log("GrapeRank : nostr interpreter : fetching events in request ",iteration, " for ",filter.authors?.length, " actors from", archive ? "the archive" : "relays:", archive ? "" : JSON.stringify(relays))
     return new Promise((resolve)=>{
       fetchEvents(filter, NostrInterpreterClass.relays, archive).then(async (newFetchedSet)=>{
         let validation = this.validate ? this.validate(newFetchedSet, filter.authors, fetchedSet) : true
