@@ -2,7 +2,7 @@ import { NostrEvent, NostrFilter, SimplePool, npubEncode, decode } from '../lib/
 import { EventReferenceTarget, EventReferenceType, EventReferenceTypes, EventTagTypes, EventTypes, NostrTagType, NostrType, PubkeyTypes } from './types'
 import { RankedPov, UnrankedPov, actorId } from '../graperank/types'
 import { EventActorReference } from '../graperank/nostr-types'
-import { getEventSource } from './event-source'
+import type { NostrEventSource } from './event-source'
 
 
 export const maxfetch = 500
@@ -244,10 +244,10 @@ export function hasEventReferenceTags(events: Set<NostrEvent>): boolean {
  */
 export async function fetchEvents(
     filters: NostrFilter,
-    relays: string[]
+    relays: string[],
+    source?: NostrEventSource
 ): Promise<Set<NostrEvent>> {
-    // A registered source (see event-source.ts) answers instead of the relays.
-    const source = getEventSource()
+    // A source given (an archive, see event-source.ts) answers instead of the relays.
     if (source) {
         return source(filters)
     }

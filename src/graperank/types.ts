@@ -80,6 +80,10 @@ export type InterpreterRequest<ParamsType> = {
   iterate?: number
   filter?: ParamsObject
   actors?: actorId[]
+  // true forces the live network (relays); false or absent lets the interpreter
+  // read a registered archive first (nostr-interpreters/event-source.ts).
+  // Carried on the request so the controllers need not know about it.
+  liveNetwork?: boolean
 }
 
 export type InterpreterResponse = {

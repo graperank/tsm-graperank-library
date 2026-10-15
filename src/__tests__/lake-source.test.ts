@@ -8,7 +8,7 @@ import { InterpretationController, InterpretersMap } from '../graperank/interpre
 import { CalculationController } from '../graperank/calculation'
 import { InterpreterFactory } from '../nostr-interpreters/factory'
 import { NostrInterpreterClass } from '../nostr-interpreters/classes'
-import { setEventSource } from '../nostr-interpreters/event-source'
+import { setArchive, NostrEventArchive, NostrEventSource } from '../nostr-interpreters/event-source'
 import { createLakeSource, LakeSource } from '../nostr-interpreters/sources/lake'
 
 // All DuckDB tests live in this one file: the native addon is loaded once per
@@ -135,7 +135,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  setEventSource(undefined)
+  setArchive(undefined)
   await withManifest?.close()
   await withoutManifest?.close()
 })
@@ -281,14 +281,24 @@ describe('lake source over relation-edges files', () => {
   })
 })
 
-describe('GrapeRank crawling the lake through the switch', () => {
+/** The lake as an archive that holds `kinds`, until createLakeSource says so itself. */
+function archiveOf(source: NostrEventSource, kinds: number[]): NostrEventArchive {
+  return {
+    source,
+    covers: (filter) => (filter.kinds ?? []).every((k) => kinds.includes(k)),
+    ping: async () => true,
+    describe: () => 'test lake',
+  }
+}
+
+describe('GrapeRank crawling the lake through the archive', () => {
   test('nostr-3 at two hops from A: ratings, frontiers and a calculation', async () => {
     NostrInterpreterClass.relays = []
     const seen: string[][] = []
-    setEventSource(async (filter) => {
+    setArchive(archiveOf(async (filter) => {
       seen.push([...(filter.authors ?? [])].sort())
       return withManifest.source(filter)
-    })
+    }, [3]))
     const statuses: InterpreterStatus[] = []
     const controller = new InterpretationController(
       new InterpretersMap([InterpreterFactory]),
@@ -326,7 +336,7 @@ describe('GrapeRank crawling the lake through the switch', () => {
 
   test('follows, then reports and reactions over the actors found: typed report values, reaction ratings', async () => {
     NostrInterpreterClass.relays = []
-    setEventSource(withManifest.source)
+    setArchive(archiveOf(withManifest.source, [3, 10000, 1984, 7]))
     const controller = new InterpretationController(new InterpretersMap([InterpreterFactory]), async () => true)
     const output = await controller.interpret({
       type: 'p',
