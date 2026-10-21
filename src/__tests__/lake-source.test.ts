@@ -268,6 +268,21 @@ describe('lake source over list-edges files', () => {
     expect(withManifest.stats().queries - before).toBeLessThan(3)
   })
 
+  test('the inline IN list (small frontiers) and the frontier table (large ones) give the same events', async () => {
+    // inlineLimit 1 sends two authors through the table; the default (2000) keeps them inline
+    const viaTable = await createLakeSource({ dir, threads: 1, inlineLimit: 1 })
+    try {
+      const shape = (events: Set<NostrEvent>) => [...events].map((e) => [e.pubkey, e.kind, e.id, e.created_at, e.tags]).sort()
+      for (const kinds of [[3], [10000], [1984], [7], [3, 10000, 1984]]) {
+        const inline = shape(await withManifest.source({ authors: [A, B, C], kinds }))
+        expect(inline.length).toBeGreaterThan(0)
+        expect(shape(await viaTable.source({ authors: [A, B, C], kinds }))).toEqual(inline)
+      }
+    } finally {
+      await viaTable.close()
+    }
+  })
+
   test('without a manifest every file under lake/ is read', async () => {
     expect(withoutManifest.stats().run).toBeUndefined()
     expect(withoutManifest.stats().relations).toBeUndefined()

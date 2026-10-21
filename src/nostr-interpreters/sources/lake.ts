@@ -30,7 +30,11 @@ import type { NostrEventArchive, NostrEventSource } from '../event-source'
  *
  * GrapeRank fires its 500-author chunks concurrently, so calls are queued and
  * served one query at a time over the union of their authors, and each call
- * gets back only the events of the authors it asked for.
+ * gets back only the events of the authors it asked for. A small frontier is
+ * matched with an inline IN list, which prunes row groups (see `inlineLimit`);
+ * a large one scans the files once. DuckDB keeps what it read over HTTP in its
+ * external file cache (within the memory limit), so a second query over the
+ * same files in one process is cheap: one instance per service process.
  *
  * The lake is read where it is served: `url` names a lake URL that serves
  * `<url>/<sha256>` by range and the manifests at `<url>/lists-manifest.json`
@@ -68,7 +72,15 @@ export type LakeSourceOptions = {
   memoryLimit?: string
   /** Where DuckDB spills large aggregates; default a fresh directory under the OS temp dir. */
   tempDirectory?: string
-  /** Up to this many authors are matched with an inline IN list, which prunes row groups; more go through a table. Default 32. */
+  /**
+   * Up to this many authors are matched with an inline `IN (unhex(..), ..)` list; more go through a
+   * `frontier` table and a semi-join. The inline list is pushed into the parquet scan as a filter and
+   * prunes row groups by their `source` statistics; the semi-join gets only a min/max dynamic filter,
+   * which covers the whole key range for any spread of pubkeys and so reads every row group (measured
+   * 2026-10-21 over the DO lake: 71 reporters cold, 22.9 s through the table, 7.3 s inline). Beyond
+   * about 2,000 authors the scan is total either way and the table spares a multi-MB statement.
+   * Default 2000.
+   */
   inlineLimit?: number
 }
 
@@ -199,7 +211,7 @@ function fillTags(template: string[][], target: string, attr: string | null): st
 
 export async function createLakeSource(options: LakeSourceOptions): Promise<LakeSource> {
   const listSupported = options.kinds ?? [3, 10000]
-  const inlineLimit = options.inlineLimit ?? 32
+  const inlineLimit = options.inlineLimit ?? 2000
   const timeoutMs = options.timeoutMs ?? 10000
   const url = options.url?.replace(/\/$/, '')
   const fileBase = url ?? options.baseUrl?.replace(/\/$/, '')
