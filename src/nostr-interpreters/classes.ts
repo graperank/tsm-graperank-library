@@ -3,6 +3,7 @@ import { RankedPov, subjectId, Interpreter, InterpreterRequest, InteractionsMap,
 import { EventActorReference, EventActorBindings, PovActorContext } from '../graperank/nostr-types'
 import { EventReferenceTarget, EventReferenceTypes, NostrEventField, NostrEventFields, NostrInterpreterClassConfig, NostrInterpreterId, NostrInterpreterKeys, NostrInterpreterParams, NostrType } from "./types"
 import { applyInteractionsByTag } from "./callbacks"
+import { chooseEventSource, getArchive, EventSourceChoice } from "./event-source"
 import { buildEventActorId, decodeEventReference, deriveActorIdsFromRankedPov, extractDTagValue, extractPaginationDTags, extractReferenceTags, fetchEvents, hasEventReferenceTags, isEventType, isPubkeyType, isRelayUrl, maxfetch, mergeRelayLists, normalizeEventActorReference, parseCoordinate, parseEventActorId, parseReferenceRank, sliceBigArray, sleep, validateNostrTypeValue } from "./helpers"
 import WebSocket from 'ws'
 import { InterpreterFactory } from '../graperank/interpretation'
@@ -50,7 +51,17 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
   readonly skipFetch : boolean
   readonly allowedActorTypes: string[]
   readonly allowedSubjectTypes: string[]
-  request? : InterpreterRequest<ParamsType>
+  // the request being served; setting one forgets the source chosen for the last
+  private _request? : InterpreterRequest<ParamsType>
+  get request() : InterpreterRequest<ParamsType> | undefined {
+    return this._request
+  }
+  set request(request : InterpreterRequest<ParamsType> | undefined) {
+    this._request = request
+    this.eventSource = undefined
+  }
+  // where this request's events come from, chosen once in fetchData()
+  eventSource? : EventSourceChoice
   private defaultParams : ParamsType
   get params(){ 
     return {...this.defaultParams, ...this.request?.params}
@@ -845,6 +856,15 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     if (this.povActorContext?.actorMode === 'event') {
       return this.fetchDataByEventActors(actors, onFetchProgress)
     }
+    // the archive or the relays, once per request (event-source.ts)
+    if(!this.eventSource) {
+      this.eventSource = await chooseEventSource(
+        {...this.request.filter, kinds : this.fetchKinds} as NostrFilter,
+        this.request.liveNetwork
+      )
+      console.log("GrapeRank : nostr interpreter : " + this.interpreterId + " reads from " + this.eventSource.source + " (" + this.eventSource.reason + ")")
+    }
+
 
     // actorslists is actors broken into an array of list, 
     // where each list is maximum size allowed for relay requests
@@ -883,9 +903,10 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
     if(!filter.authors || !filter.authors.length)
       return new Promise((resolve,reject)=> reject("No authors provided"))
     const relays = NostrInterpreterClass.relays
-    console.log("GrapeRank : nostr interpreter : fetching events in request ",iteration, " for ",filter.authors?.length, " actors from relays:", relays, "relays length:", relays.length, "relays JSON:", JSON.stringify(relays))
+    const archive = this.eventSource?.source === 'archive' ? getArchive()?.source : undefined
+    console.log("GrapeRank : nostr interpreter : fetching events in request ",iteration, " for ",filter.authors?.length, " actors from", archive ? "the archive" : "relays:", archive ? "" : JSON.stringify(relays))
     return new Promise((resolve)=>{
-      fetchEvents(filter, NostrInterpreterClass.relays).then(async (newFetchedSet)=>{
+      fetchEvents(filter, NostrInterpreterClass.relays, archive).then(async (newFetchedSet)=>{
         let validation = this.validate ? this.validate(newFetchedSet, filter.authors, fetchedSet) : true
         try{
 

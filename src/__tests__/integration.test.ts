@@ -2,6 +2,8 @@ import { NostrEvent } from '../lib/nostr-tools'
 import { parseServiceRequest } from '../tsm/requests'
 import { executeServiceRequest, ServiceOutputError } from '../tsm/output'
 import { UnsignedEvent } from '../tsm/types'
+import { setArchive, NostrEventArchive } from '../nostr-interpreters/event-source'
+import { NostrInterpreterClass } from '../nostr-interpreters/classes'
 
 describe('TSM Integration: Request to Output', () => {
   const mockRequestEvent: NostrEvent = {
@@ -21,6 +23,83 @@ describe('TSM Integration: Request to Output', () => {
     content: '',
     sig: 'test-sig'
   }
+
+  describe('Which source each interpreter read, told as feedback and recorded in the metrics', () => {
+    // An archive holding follows for the pov: the run completes, so the final
+    // feedback carries the metrics
+    const archive: NostrEventArchive = {
+      source: async (filter) =>
+        new Set(
+          (filter.authors ?? []).map((pubkey) => ({
+            id: `list-of-${pubkey}`,
+            pubkey,
+            created_at: 1700000000,
+            kind: 3,
+            tags: [['p', 'cc'.repeat(32)]],
+            content: '',
+            sig: '',
+          }))
+        ),
+      covers: (filter) => (filter.kinds ?? []).every((k) => k === 3),
+      ping: async () => true,
+      describe: () => 'stub lake, lists run r1',
+    }
+    // the interpreters rate only hex pubkeys, so the run reaches the calculation
+    const A = 'aa'.repeat(32)
+    const B = 'bb'.repeat(32)
+    const hexRequestEvent: NostrEvent = {
+      ...mockRequestEvent,
+      tags: mockRequestEvent.tags.map((t) => (t[1] === 'pov' ? ['config', 'pov', JSON.stringify([A, B])] : t)),
+    }
+    beforeEach(() => {
+      NostrInterpreterClass.relays = []
+      setArchive(archive)
+    })
+    afterEach(() => setArchive(undefined))
+
+    const run = async (event: NostrEvent): Promise<UnsignedEvent[]> => {
+      const feedback: UnsignedEvent[] = []
+      await executeServiceRequest({
+        requestEvent: event,
+        parsedRequest: parseServiceRequest(event),
+        callbacks: { onFeedbackEvent: async (e) => { feedback.push(e) } },
+      })
+      return feedback
+    }
+    const messages = (feedback: UnsignedEvent[]) => feedback.map((e) => e.content)
+    const finalMetrics = (feedback: UnsignedEvent[]) => {
+      const tag = feedback[feedback.length - 1].tags.find((t) => t[0] === 'metrics')
+      return tag ? JSON.parse(tag[1]) : undefined
+    }
+
+    test('archive first: the note is sent without verbose feedback, once per interpreter, and the metrics keep it', async () => {
+      const feedback = await run(hexRequestEvent)
+      const notes = messages(feedback).filter((m) => m.includes('reads from'))
+      expect(notes).toEqual(['Interpreter nostr-3 reads from archive (stub lake, lists run r1)'])
+      expect(finalMetrics(feedback).sources).toEqual({ 'nostr-3': { source: 'archive', reason: 'stub lake, lists run r1' } })
+      expect(messages(feedback).some((m) => m.startsWith('Calculation completed'))).toBe(true)
+    })
+
+    test('liveNetwork true: every interpreter reads the relays, and says so', async () => {
+      const live: NostrEvent = { ...hexRequestEvent, tags: [...hexRequestEvent.tags, ['config', 'liveNetwork', 'true']] }
+      const feedback = await run(live)
+      const notes = messages(feedback).filter((m) => m.includes('reads from'))
+      expect(notes).toEqual(['Interpreter nostr-3 reads from relays (liveNetwork)'])
+    })
+
+    test('a kind the archive does not hold reads the relays while the others read the archive', async () => {
+      const two: NostrEvent = {
+        ...hexRequestEvent,
+        tags: hexRequestEvent.tags.map((t) => (t[1] === 'interpreters' ? ['config', 'interpreters', '[{"id":"nostr-3","iterate":1},{"id":"nostr-1984"}]'] : t)),
+      }
+      const feedback = await run(two)
+      expect(messages(feedback).filter((m) => m.includes('reads from'))).toEqual([
+        'Interpreter nostr-3 reads from archive (stub lake, lists run r1)',
+        'Interpreter nostr-1984 reads from relays (not held)',
+      ])
+      expect(Object.keys(finalMetrics(feedback).sources)).toEqual(['nostr-3', 'nostr-1984'])
+    })
+  })
 
   describe('Full request-to-output flow', () => {
     test('should parse request successfully', () => {

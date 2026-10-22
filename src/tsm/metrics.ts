@@ -64,6 +64,9 @@ export interface RequestMetrics {
     total_rankings: number
   }
   
+  // Where each interpreter read its events from (archive or relays) and why
+  sources?: Record<string, { source: string; reason: string }>
+
   // Infrastructure info
   infrastructure: {
     node_version: string
@@ -142,6 +145,10 @@ export class MetricsCollector {
   setOutputTotals(pages: number, rankings: number): void {
     this.metrics.output.total_pages = pages
     this.metrics.output.total_rankings = rankings
+  }
+
+  setSource(interpreterId: string, choice: { source: string; reason: string }): void {
+    this.metrics.sources = { ...(this.metrics.sources ?? {}), [interpreterId]: { ...choice } }
   }
 
   finalize(): RequestMetrics {
