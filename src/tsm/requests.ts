@@ -19,6 +19,10 @@ export type ServiceRequestConfigs = {
   rigor?: number
   precision?: number
   interpreters?: InterpreterRequest<any>[]
+  /** Prune new actors below this fraction of minrank before the next degree (0 = off). */
+  prune_minimum?: number
+  /** Keep at most this many new actors per degree, highest interim rank first (0 = off). */
+  prune_max_actors?: number
   [key: string]: any
 }
 
@@ -128,6 +132,20 @@ export function parseServiceRequest(
     )
   }
   
+  const pruneMinimumValue = getConfigTag(event.tags, 'prune_minimum')
+  const pruneMinimum = parseConfigValue(pruneMinimumValue, 'number') ?? defaults?.prune_minimum ?? 0
+  configs.prune_minimum = pruneMinimum
+  if (pruneMinimum < 0) {
+    throw new ServiceRequestParseError(`prune_minimum must be >= 0, got ${pruneMinimum}`, 'prune_minimum')
+  }
+
+  const pruneMaxActorsValue = getConfigTag(event.tags, 'prune_max_actors')
+  const pruneMaxActors = parseConfigValue(pruneMaxActorsValue, 'number') ?? defaults?.prune_max_actors ?? 0
+  configs.prune_max_actors = pruneMaxActors
+  if (pruneMaxActors < 0 || !Number.isInteger(pruneMaxActors)) {
+    throw new ServiceRequestParseError(`prune_max_actors must be a non-negative integer, got ${pruneMaxActors}`, 'prune_max_actors')
+  }
+
   const interpretersValue = getConfigTag(event.tags, 'interpreters')
   configs.interpreters = parseConfigValue(interpretersValue, 'json') || defaults?.interpreters
   
@@ -141,7 +159,7 @@ export function parseServiceRequest(
   event.tags.forEach(tag => {
     if (tag[0] === 'config' && tag[1] && tag[2]) {
       const key = tag[1]
-      if (!['type', 'pov', 'minrank', 'attenuation', 'rigor', 'precision', 'interpreters'].includes(key)) {
+      if (!['type', 'pov', 'minrank', 'attenuation', 'rigor', 'precision', 'interpreters', 'prune_minimum', 'prune_max_actors'].includes(key)) {
         configs[key] = tag[2]
       }
     }
@@ -172,17 +190,21 @@ export function parseServiceRequest(
     )
   }
   
-  const interpretationInput: InterpretationInput = {
-    type: configs.type,
-    pov: configs.pov,
-    requests: configs.interpreters
-  }
-  
   const calculatorParams: CalculatorParams = {
     attenuation,
     rigor,
     minimum: minrank,
     precision
+  }
+
+  const interpretationInput: InterpretationInput = {
+    type: configs.type,
+    pov: configs.pov,
+    requests: configs.interpreters,
+    calculatorParams,
+    ...(pruneMinimum > 0 || pruneMaxActors > 0
+      ? { prune: { minimumFraction: pruneMinimum, maxActors: pruneMaxActors } }
+      : {}),
   }
   
   return {

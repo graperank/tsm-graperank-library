@@ -1,4 +1,6 @@
-import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput, InterpreterFetchProgress, InterpreterFetchProgressCallback, FinalizedInterpreterInteractions } from "./types"
+import { CalculationController } from './calculation'
+import { isPruningEnabled, resolvePruneSettings, selectActorsToExpand } from './pruning'
+import type { InterpreterRequest, InteractionsList, actorId, subjectId, InterpreterResponse, InteractionsMap, InterpreterStatus, InterpreterId, lowercase, povType, InterpretationInput, InterpretationOutput, InterpreterFetchProgress, InterpreterFetchProgressCallback, FinalizedInterpreterInteractions, RankedPov } from "./types"
 import type { Interpreter, InterpreterInitializer, InterpreterParams } from "./types"
 import type { PovActorContext } from './nostr-types'
 import { deriveActorIdsFromRankedPov, normalizePov } from "../nostr-interpreters/helpers"
@@ -87,6 +89,8 @@ export class InterpretationController {
           }
           // increment for each interpreter iteration
           currentIteration ++
+          let prunedThisIteration = 0
+          let stopIterating = false
           currentActors = requestActors || ( newActors?.size ?  newActors : new Set(allActors.keys()) )
           console.log("GrapeRank : interpret : "+request.id +" protocol : begin iteration ", currentIteration, " of ", maxIterations,", with ",currentActors?.size," actors")
           // // DEBUG
@@ -163,6 +167,10 @@ export class InterpretationController {
             if(currentIteration < maxIterations) {
               // get new actors discovered during latest iteration fetch
               const resolvedActors = await this.interpreters.resolveActors(request.id)
+              // Only the actors discovered in THIS iteration are expanded next
+              // iteration. (Previously `newActors` accumulated across
+              // iterations, so every iteration re-fetched all earlier degrees.)
+              newActors.clear()
               resolvedActors?.forEach((actor) => {
                   if(!allActors.has(actor)) {
                     newActors.add(actor)
@@ -170,6 +178,26 @@ export class InterpretationController {
                   }
                 })
                 console.log("GrapeRank : interpret : "+request.id +" protocol : added " ,newActors.size, " new actors")
+
+              // Prune between degrees of separation (opt-in via input.prune):
+              // interim-rank what has been interpreted so far and drop the
+              // new actors that are not worth expanding next iteration.
+              const pruneSettings = resolvePruneSettings(input.prune, input.calculatorParams)
+              if (isPruningEnabled(pruneSettings) && newActors.size > 0) {
+                const discovered = newActors.size
+                prunedThisIteration = await this.pruneNewActors(
+                  request.id, requestindex, newActors, allActors, currentInteractions, outputInteractions, outputPov, input, pruneSettings,
+                )
+                interpreterStatus.pruned = [prunedThisIteration, discovered]
+                await updateInterpreterStatus(interpreterStatus, 'failed updating status after prune')
+              }
+
+              // Nothing new to expand: further iterations could only re-fetch
+              // actors already processed, so stop early.
+              if (newActors.size === 0) {
+                console.log("GrapeRank : interpret : "+request.id +" protocol : no new actors after iteration ", currentIteration, "; stopping iterations early")
+                stopIterating = true
+              }
             }
             
             // Memory optimization: Clear fetched events AFTER resolveActors has extracted subjects
@@ -200,11 +228,13 @@ export class InterpretationController {
             numActors : currentActors.size,
             // TODO get numFetched from protocol
             numFetched : undefined,
-            numInteractions : newInteractions ? newInteractions.size : 0
+            numInteractions : newInteractions ? newInteractions.size : 0,
+            numPruned : prunedThisIteration
           })
 
           console.log("GrapeRank : interpret : "+request.id +" protocol : end iteration ", currentIteration, " of ", maxIterations)
           console.log("----------------------------------")
+          if (stopIterating) break
         }
 
         // add the final map of currentInteractions to interactions list
@@ -238,6 +268,61 @@ export class InterpretationController {
     this.interpreters.clear()
     return {interactions: outputInteractions, responses: outputResponses, pov: outputPov}
 
+  }
+
+  /**
+   * Interim-rank everything interpreted so far (finished interpreters'
+   * lists plus the running map of the current one) and remove from
+   * `newActors` (this iteration's discoveries) and `allActors` the actors
+   * that `selectActorsToExpand` rejects. Actors discovered in earlier
+   * iterations are never revisited. Returns the number pruned. Pruned actors keep whatever rank
+   * the interactions pointing at them produce; they are only excluded from
+   * being expanded (their own outgoing interactions are not fetched).
+   */
+  private async pruneNewActors(
+    requestId: InterpreterId<any>,
+    requestIndex: number,
+    newActors: Set<actorId>,
+    allActors: Map<actorId, number>,
+    currentInteractions: InteractionsMap,
+    previousInteractions: InteractionsList,
+    pov: RankedPov,
+    input: InterpretationInput,
+    settings: { threshold: number; cap: number },
+  ): Promise<number> {
+    const discovered = newActors.size
+    // Cheap exits: nothing to cut by cap and no threshold to apply.
+    if (settings.threshold <= 0 && (settings.cap <= 0 || discovered <= settings.cap)) return 0
+
+    const started = Date.now()
+    const interactions: InteractionsList = [...previousInteractions]
+    addToInteractionsList(requestId, requestIndex, currentInteractions, interactions)
+
+    const calculator = new CalculationController(pov, interactions, {
+      ...(input.calculatorParams ?? {}),
+      minimum: 0,   // we need every interim rank, not only those above the output cutoff
+      devmode: false,
+    })
+    const rankings = await calculator.calculate()
+    const rankByActor = new Map<actorId, number>()
+    for (const [subject, data] of rankings) rankByActor.set(subject, data.rank ?? 0)
+
+    const candidates: Array<[actorId, number]> = [...newActors].map(actor => [actor, rankByActor.get(actor) ?? 0])
+    const keep = selectActorsToExpand(candidates, settings)
+
+    let pruned = 0
+    for (const actor of candidates.map(([actor]) => actor)) {
+      if (keep.has(actor)) continue
+      newActors.delete(actor)
+      allActors.delete(actor)
+      pruned++
+    }
+    console.log(
+      "GrapeRank : interpret : " + requestId + " protocol : prune : kept", keep.size, "of", discovered,
+      "new actors (threshold", settings.threshold, ", cap", settings.cap || "none", ",", rankings.length,
+      "interim rankings in", Date.now() - started, "ms)",
+    )
+    return pruned
   }
 
 }

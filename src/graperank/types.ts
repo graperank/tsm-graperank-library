@@ -89,6 +89,30 @@ export type InterpreterResponse = {
   numActors?: number
   numFetched?: number
   numInteractions?: number
+  /** Newly discovered actors dropped before the next degree of separation. */
+  numPruned?: number
+}
+
+/**
+ * Prune newly discovered actors between degrees of separation, so the
+ * next iteration does not fetch and expand actors that would not matter.
+ * Pruned actors remain subjects (they are still ranked by the interactions
+ * already pointing at them); they just do not get their own outgoing
+ * interactions fetched. Both knobs are off by default.
+ */
+export type PruneParams = {
+  /**
+   * Drop newly discovered actors whose interim rank is below
+   * `minimumFraction * minimum` (the calculator output cutoff). Interim
+   * ranks slightly underestimate final ranks (later degrees add backward
+   * edges), so values below 1 leave a safety margin. 0 disables.
+   */
+  minimumFraction?: number
+  /**
+   * Keep at most this many newly discovered actors per iteration, highest
+   * interim rank first, ties broken by actor id. 0 disables.
+   */
+  maxActors?: number
 }
 
 
@@ -119,6 +143,10 @@ export type InterpretationInput = {
   type : povType,
   pov : RankedPov | UnrankedPov,
   requests : InterpreterRequest<any>[],
+  /** Calculator parameters, used for interim ranking when `prune` is set. */
+  calculatorParams?: Partial<CalculatorParams>,
+  /** Prune newly discovered actors between degrees of separation. */
+  prune?: PruneParams,
 }
 export type InterpretationOutput = {
   interactions: InteractionsList
@@ -144,6 +172,8 @@ export type InterpreterStatus = {
   fetchProgress?: InterpreterFetchProgress
   fetched?: [number, number, true?]
   interpreted?: [number, number, true?]
+  /** [pruned, discovered] newly discovered actors at the end of this iteration. */
+  pruned?: [number, number]
 }
 
 // Pluggable Interpreters are responsible for 

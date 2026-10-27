@@ -128,6 +128,22 @@ export function generateServiceAnnouncement(
     String(precisionConfig.default)
   ])
   
+  tags.push([
+    'config',
+    'prune_minimum',
+    '0+',
+    'Before expanding the next degree of separation, drop newly discovered actors whose interim rank is below this fraction of minrank (0 disables).',
+    '0'
+  ])
+
+  tags.push([
+    'config',
+    'prune_max_actors',
+    'integer',
+    'Keep at most this many newly discovered actors per degree of separation, highest interim rank first (0 disables).',
+    '0'
+  ])
+
   const interpreters = config.interpreters || generateDefaultInterpreters()
   tags.push([
     'config',

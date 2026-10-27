@@ -1,6 +1,7 @@
 export * from './graperank/calculation'
 export { InterpretationController, InterpreterFactory, InterpretersMap } from './graperank/interpretation'
 export * from './graperank/types'
+export * from './graperank/pruning'
 export * from './graperank/nostr-types'
 
 export * from './nostr-interpreters/callbacks'

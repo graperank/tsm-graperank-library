@@ -13,6 +13,58 @@ describe('TSM Request Parser', () => {
   }
 
   describe('parseServiceRequest', () => {
+    test('should parse pruning configs into the interpretation input', () => {
+      const event: NostrEvent = {
+        ...baseRequestEvent,
+        tags: [
+          ['config', 'type', 'p'],
+          ['config', 'pov', '["npub1test"]'],
+          ['config', 'minrank', '0.0001'],
+          ['config', 'prune_minimum', '0.5'],
+          ['config', 'prune_max_actors', '30000'],
+          ['config', 'interpreters', '[{"id":"nostr-3","iterate":3}]']
+        ]
+      }
+
+      const result = parseServiceRequest(event)
+
+      expect(result.configs.prune_minimum).toBe(0.5)
+      expect(result.configs.prune_max_actors).toBe(30000)
+      expect(result.interpretationInput.prune).toEqual({ minimumFraction: 0.5, maxActors: 30000 })
+      expect(result.interpretationInput.calculatorParams).toEqual(result.calculatorParams)
+    })
+
+    test('should leave pruning off when the configs are absent', () => {
+      const event: NostrEvent = {
+        ...baseRequestEvent,
+        tags: [
+          ['config', 'type', 'p'],
+          ['config', 'pov', '["npub1test"]'],
+          ['config', 'interpreters', '[{"id":"nostr-3","iterate":3}]']
+        ]
+      }
+
+      const result = parseServiceRequest(event)
+
+      expect(result.configs.prune_minimum).toBe(0)
+      expect(result.configs.prune_max_actors).toBe(0)
+      expect(result.interpretationInput.prune).toBeUndefined()
+    })
+
+    test('should reject a negative prune_minimum', () => {
+      const event: NostrEvent = {
+        ...baseRequestEvent,
+        tags: [
+          ['config', 'type', 'p'],
+          ['config', 'pov', '["npub1test"]'],
+          ['config', 'prune_minimum', '-1'],
+          ['config', 'interpreters', '[{"id":"nostr-3","iterate":3}]']
+        ]
+      }
+
+      expect(() => parseServiceRequest(event)).toThrow(/prune_minimum/)
+    })
+
     test('should parse valid request with all configs', () => {
       const event: NostrEvent = {
         ...baseRequestEvent,
