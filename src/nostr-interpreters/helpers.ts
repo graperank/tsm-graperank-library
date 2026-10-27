@@ -1,4 +1,4 @@
-import { NostrEvent, NostrFilter, SimplePool, npubEncode, decode } from '../lib/nostr-tools'
+import { NostrEvent, NostrFilter, SimplePool, useWebSocketImplementation, npubEncode, decode } from '../lib/nostr-tools'
 import { EventReferenceTarget, EventReferenceType, EventReferenceTypes, EventTagTypes, EventTypes, NostrTagType, NostrType, PubkeyTypes } from './types'
 import { RankedPov, UnrankedPov, actorId } from '../graperank/types'
 import { EventActorReference } from '../graperank/nostr-types'
@@ -241,6 +241,244 @@ export function hasEventReferenceTags(events: Set<NostrEvent>): boolean {
  * @param filters 
  * @returns 
  */
+// ── Relay fetch configuration ────────────────────────────────────────────────
+
+export interface RelayFetchConfig {
+  /**
+   * Relays the caller considers local and complete (same host or private
+   * network). When every relay of a fetch is local, no inter-fetch delay
+   * is applied and no end-of-stream grace is waited for stragglers.
+   * Matched by normalized URL (case-insensitive, trailing slash ignored).
+   * The library never assumes which relays are local; callers declare them.
+   */
+  localRelays: string[]
+  /** After the first external relay ends its stream, wait at most this long for the others. */
+  eoseGraceMs: number
+  /** Give up on a fetch after this long regardless of relay state. */
+  absoluteTimeoutMs: number
+  /** Delay between consecutive fetches when any relay in the fetch is external (politeness). */
+  interFetchDelayMs: number
+  /** How long to wait for a relay websocket to open. */
+  connectionTimeoutMs: number
+}
+
+const relayFetchConfig: RelayFetchConfig = {
+  localRelays: [],
+  eoseGraceMs: 2000,
+  absoluteTimeoutMs: 12000,
+  interFetchDelayMs: 500,
+  connectionTimeoutMs: 5000,
+}
+
+export function normalizeRelayUrl(url: string): string {
+  return url.trim().toLowerCase().replace(/\/+$/, '')
+}
+
+/** Override relay fetch behaviour. Unspecified fields keep their current value. */
+export function configureRelayFetch(options: Partial<RelayFetchConfig>): RelayFetchConfig {
+  if (options.localRelays) {
+    relayFetchConfig.localRelays = options.localRelays.filter(isRelayUrl).map(normalizeRelayUrl)
+  }
+  for (const key of ['eoseGraceMs', 'absoluteTimeoutMs', 'interFetchDelayMs', 'connectionTimeoutMs'] as const) {
+    const value = options[key]
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) relayFetchConfig[key] = value
+  }
+  return getRelayFetchConfig()
+}
+
+export function getRelayFetchConfig(): RelayFetchConfig {
+  return { ...relayFetchConfig, localRelays: [...relayFetchConfig.localRelays] }
+}
+
+export function isLocalRelay(url: string): boolean {
+  return relayFetchConfig.localRelays.includes(normalizeRelayUrl(url))
+}
+
+export function allRelaysLocal(relays: string[]): boolean {
+  return relays.length > 0 && relays.every(isLocalRelay)
+}
+
+/** Politeness delay to apply before a fetch against `relays`: none when all are local. */
+export function fetchDelayFor(relays: string[]): number {
+  return allRelaysLocal(relays) ? 0 : relayFetchConfig.interFetchDelayMs
+}
+
+// ── Shared connections (one per relay, reused across fetches) ────────────────
+
+type WsModule = typeof import('ws')
+let wsModulePromise: Promise<WsModule['default']> | undefined
+function loadWs(): Promise<WsModule['default']> {
+  if (!wsModulePromise) wsModulePromise = import('ws').then(m => m.default)
+  return wsModulePromise
+}
+
+let sharedPool: SimplePool | undefined
+let websocketImplementationInstalled = false
+
+async function getSharedPool(): Promise<SimplePool> {
+  if (!sharedPool) {
+    // nostr-tools needs a global WebSocket; Node < 22 has none.
+    if (!websocketImplementationInstalled && typeof (globalThis as { WebSocket?: unknown }).WebSocket === 'undefined') {
+      const ws = await loadWs()
+      useWebSocketImplementation(ws as unknown as typeof WebSocket)
+      websocketImplementationInstalled = true
+    }
+    sharedPool = new SimplePool()
+  }
+  return sharedPool
+}
+
+interface RawSubscriptionHandlers {
+  onEvent: (event: NostrEvent) => void
+  onEose: () => void
+  onClose: (reason: string) => void
+}
+
+/**
+ * A single persistent websocket to one relay, multiplexing REQ
+ * subscriptions by id. Used for kinds whose events can exceed what
+ * nostr-tools is willing to validate (large follow lists), so that path
+ * no longer opens a fresh connection per fetch.
+ */
+class RawRelayConnection {
+  private ws: import('ws').WebSocket | undefined
+  private opening: Promise<void> | undefined
+  private readonly subscriptions = new Map<string, RawSubscriptionHandlers>()
+
+  constructor(readonly url: string) {}
+
+  private async open(): Promise<void> {
+    if (this.ws && this.ws.readyState === this.ws.OPEN) return
+    if (this.opening) return this.opening
+    this.opening = (async () => {
+      const WebSocketImpl = await loadWs()
+      await new Promise<void>((resolve, reject) => {
+        const socket = new WebSocketImpl(this.url)
+        let settled = false
+        const timer = setTimeout(() => {
+          if (settled) return
+          settled = true
+          try { socket.terminate() } catch { /* ignore */ }
+          reject(new Error(`connection timeout after ${relayFetchConfig.connectionTimeoutMs}ms`))
+        }, relayFetchConfig.connectionTimeoutMs)
+
+        socket.on('open', () => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          this.ws = socket
+          resolve()
+        })
+        socket.on('message', (data: Buffer) => this.dispatch(data))
+        socket.on('error', (err: Error) => {
+          if (!settled) {
+            settled = true
+            clearTimeout(timer)
+            reject(err)
+          } else {
+            console.warn(`RawRelayConnection ${this.url}: error:`, err.message)
+          }
+        })
+        socket.on('close', (code: number) => {
+          if (!settled) {
+            settled = true
+            clearTimeout(timer)
+            reject(new Error(`closed before open (code ${code})`))
+          }
+          if (this.ws === socket) this.ws = undefined
+          const pending = [...this.subscriptions.entries()]
+          this.subscriptions.clear()
+          for (const [, handlers] of pending) handlers.onClose(`connection closed (code ${code})`)
+        })
+      })
+    })().finally(() => { this.opening = undefined })
+    return this.opening
+  }
+
+  private dispatch(data: Buffer): void {
+    let message: unknown
+    try { message = JSON.parse(data.toString()) } catch { return }
+    if (!Array.isArray(message)) return
+    const [type, subscriptionId, payload] = message as [string, string, unknown]
+    const handlers = this.subscriptions.get(subscriptionId)
+    if (!handlers) return
+    if (type === 'EVENT') {
+      handlers.onEvent(payload as NostrEvent)
+    } else if (type === 'EOSE') {
+      handlers.onEose()
+    } else if (type === 'CLOSED') {
+      this.subscriptions.delete(subscriptionId)
+      handlers.onClose(typeof payload === 'string' ? payload : 'closed by relay')
+    }
+  }
+
+  /**
+   * Open a REQ. Returns a function that closes it. Connection failures are
+   * reported through `handlers.onClose` so callers treat them like a relay
+   * that answered with nothing.
+   */
+  async request(filters: NostrFilter, handlers: RawSubscriptionHandlers): Promise<() => void> {
+    try {
+      await this.open()
+    } catch (err) {
+      handlers.onClose(err instanceof Error ? err.message : String(err))
+      return () => { /* nothing to close */ }
+    }
+    const socket = this.ws
+    if (!socket) {
+      handlers.onClose('no connection')
+      return () => { /* nothing to close */ }
+    }
+    const subscriptionId = Math.random().toString(36).slice(2, 10)
+    this.subscriptions.set(subscriptionId, handlers)
+    try {
+      socket.send(JSON.stringify(['REQ', subscriptionId, filters]))
+    } catch (err) {
+      this.subscriptions.delete(subscriptionId)
+      handlers.onClose(err instanceof Error ? err.message : String(err))
+      return () => { /* nothing to close */ }
+    }
+    return () => {
+      if (!this.subscriptions.delete(subscriptionId)) return
+      if (socket.readyState === socket.OPEN) {
+        try { socket.send(JSON.stringify(['CLOSE', subscriptionId])) } catch { /* ignore */ }
+      }
+    }
+  }
+
+  terminate(): void {
+    const socket = this.ws
+    this.ws = undefined
+    this.subscriptions.clear()
+    if (socket) {
+      try { socket.terminate() } catch { /* ignore */ }
+    }
+  }
+}
+
+const rawConnections = new Map<string, RawRelayConnection>()
+function getRawConnection(url: string): RawRelayConnection {
+  const key = normalizeRelayUrl(url)
+  let connection = rawConnections.get(key)
+  if (!connection) {
+    connection = new RawRelayConnection(url)
+    rawConnections.set(key, connection)
+  }
+  return connection
+}
+
+/** Tear down every shared relay connection (process shutdown, tests). */
+export function closeRelayConnections(): void {
+  for (const connection of rawConnections.values()) connection.terminate()
+  rawConnections.clear()
+  if (sharedPool) {
+    try { sharedPool.destroy() } catch { /* ignore */ }
+    sharedPool = undefined
+  }
+}
+
+// ── Fetching ─────────────────────────────────────────────────────────────────
+
 export async function fetchEvents(
     filters: NostrFilter,
     relays: string[]
@@ -254,187 +492,118 @@ export async function fetchEvents(
         filters.limit = 1000;
     }
     console.log("fetchEvents called with relays:", relays, "relays length:", relays.length, "filters:", JSON.stringify(filters))
-    
-    // For kind 3 (replaceable), use direct WebSocket to bypass nostr-tools validation
-    // which fails on large events (620+ tags)
-    const isReplaceableKind = filters.kinds?.includes(3) || filters.kinds?.includes(0) || 
+
+    // For replaceable kinds (0, 3, 10k-20k) use the raw connection to bypass
+    // nostr-tools validation, which fails on very large events (620+ tags).
+    const isReplaceableKind = filters.kinds?.includes(3) || filters.kinds?.includes(0) ||
                                (filters.kinds?.some(k => k >= 10000 && k < 20000))
-    
+
     if (isReplaceableKind) {
-        console.log("fetchEvents using raw WebSocket for replaceable kind to bypass validation")
         return fetchEventsRaw(filters, relays)
     }
-    
+
+    const pool = await getSharedPool()
+    const events: Map<string, NostrEvent> = new Map()
+
     return new Promise((resolve) => {
-        const events: Map<string, NostrEvent> = new Map();
-        let eoseReceived = false;
-        let closed = false;
+        let resolved = false
+        let subscription: { close: () => void } | undefined
 
-        const closeAndResolve = () => {
-            if (closed) return;
-            closed = true;
-            console.log("fetchEvents closing with", events.size, "events")
-            try { h.close() } catch (err) { console.warn("fetchEvents: subscription close failed:", err) }
-            // `pool.close` only closes relays whose connection completed. A
-            // relay that is still connecting at this point would otherwise
-            // finish later and stay open forever (observed: ~16k leaked
-            // sockets per slow relay after months). `destroy()` tears down
-            // every relay in the pool, connected or not.
-            try { pool.close(relays) } catch (err) { console.warn("fetchEvents: pool close failed:", err) }
-            try { (pool as unknown as { destroy?: () => void }).destroy?.() } catch (err) { console.warn("fetchEvents: pool destroy failed:", err) }
-            resolve(new Set(events.values()));
-        };
+        const finish = (reason: string) => {
+            if (resolved) return
+            resolved = true
+            clearTimeout(absoluteTimer)
+            try { subscription?.close() } catch (err) { console.warn("fetchEvents: subscription close failed:", err) }
+            console.log("fetchEvents closing with", events.size, "events (" + reason + ")")
+            resolve(new Set(events.values()))
+        }
 
-        const onEvent = (event: NostrEvent) => {
-            console.log("fetchEvents onEvent called, event kind:", event.kind, "id:", event.id.substring(0, 8))
-            const dedupKey = deduplicationKey(event);
+        const absoluteTimer = setTimeout(() => finish("absolute timeout"), relayFetchConfig.absoluteTimeoutMs)
 
-            const existingEvent = events.get(dedupKey);
-            if (existingEvent) {
-                event = dedupEvent(existingEvent, event);
-            }
-
-            events.set(dedupKey, event);
-        };
-
-        const pool = new SimplePool()
-
-        let h = pool.subscribeMany(
-          [...relays],filters,
-          {
+        subscription = pool.subscribeMany([...relays], filters, {
             onevent(event: NostrEvent) {
-              console.log("fetchEvents onevent triggered for event:", event.id?.substring(0, 8), "kind:", event.kind)
-              onEvent(event);
+                const dedupKey = deduplicationKey(event)
+                const existingEvent = events.get(dedupKey)
+                events.set(dedupKey, existingEvent ? dedupEvent(existingEvent, event) : event)
             },
-            oneose() {
-              if (!eoseReceived) {
-                console.log("fetchEvents first EOSE received, waiting 2s for other relays...")
-                eoseReceived = true;
-                
-                // Wait 2 more seconds for other relays to respond after first EOSE
-                setTimeout(() => {
-                  closeAndResolve();
-                }, 2000);
-              }
-            },
-            onclose(reasons: string[]) {
-              console.log("fetchEvents subscription closed by relay, reasons:", reasons)
-            }
-          }
-        )
-
-        // Absolute timeout: close after 12 seconds even if no EOSE received
-        setTimeout(() => {
-            if (!closed) {
-                console.log("fetchEvents absolute timeout reached, closing with", events.size, "events")
-                closeAndResolve();
-            }
-        }, 12000);
+            // nostr-tools fires `oneose` once every relay has ended its
+            // stream or failed to connect, so nothing is gained by waiting
+            // any longer.
+            oneose() { finish("all relays ended") },
+            onclose(reasons: string[]) { finish("all relays closed: " + reasons.join("; ")) },
+        })
+        if (resolved) {
+            try { subscription.close() } catch { /* ignore */ }
+        }
     });
 }
 
-// Raw WebSocket implementation that bypasses nostr-tools validation
-// Used for replaceable events (kind 0, 3, 10k-20k) that may be large
+/**
+ * Fetch over persistent raw websockets (one per relay). Resolves when every
+ * relay has ended its stream or failed, or, for fetches that include
+ * external relays, `eoseGraceMs` after the first relay ends its stream, or
+ * at `absoluteTimeoutMs`. Fetches against local relays only never wait for
+ * stragglers.
+ */
 async function fetchEventsRaw(
     filters: NostrFilter,
     relays: string[]
 ): Promise<Set<NostrEvent>> {
-    const WebSocket = (await import('ws')).default
     const events: Map<string, NostrEvent> = new Map()
-    let eoseCount = 0
-    let closed = false
+    const graceMs = allRelaysLocal(relays) ? 0 : relayFetchConfig.eoseGraceMs
 
     return new Promise((resolve) => {
-        const connections: any[] = []
-        const subscriptionId = Math.random().toString(36).substring(7)
+        let resolved = false
+        let relaysDone = 0
+        let eoseCount = 0
+        let graceTimer: ReturnType<typeof setTimeout> | undefined
+        const closers: Array<() => void> = []
 
-        const closeAll = () => {
-            if (closed) return
-            closed = true
-            console.log("fetchEventsRaw closing with", events.size, "events from", eoseCount, "relays")
-            connections.forEach(ws => {
-                try {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify(['CLOSE', subscriptionId]))
-                        ws.close()
-                    } else {
-                        // CONNECTING or CLOSING: abort the handshake / force
-                        // the socket down so a slow relay cannot leave it
-                        // open after we have resolved.
-                        ws.terminate()
-                    }
-                } catch (err) {
-                    console.warn("fetchEventsRaw: close failed for a connection:", err)
-                }
-            })
+        const finish = (reason: string) => {
+            if (resolved) return
+            resolved = true
+            clearTimeout(absoluteTimer)
+            if (graceTimer) clearTimeout(graceTimer)
+            for (const close of closers) {
+                try { close() } catch (err) { console.warn("fetchEventsRaw: close failed:", err) }
+            }
+            console.log("fetchEventsRaw closing with", events.size, "events from", eoseCount, "of", relays.length, "relays (" + reason + ")")
             resolve(new Set(events.values()))
         }
 
-        relays.forEach((relay) => {
-            try {
-                const ws = new WebSocket(relay)
-                connections.push(ws)
+        const absoluteTimer = setTimeout(() => finish("absolute timeout"), relayFetchConfig.absoluteTimeoutMs)
 
-                ws.on('open', () => {
-                    if (closed) {
-                        // Connected after we already resolved: do not open a
-                        // subscription that nobody will close.
-                        try { ws.close() } catch { /* ignore */ }
-                        return
+        const relayDone = () => {
+            relaysDone++
+            if (relaysDone >= relays.length) finish("all relays done")
+        }
+
+        for (const relay of relays) {
+            let done = false
+            const once = (fn: () => void) => { if (!done) { done = true; fn() } }
+            void getRawConnection(relay).request(filters, {
+                onEvent: (event) => {
+                    if (resolved || !event || typeof event !== 'object') return
+                    const dedupKey = deduplicationKey(event)
+                    const existingEvent = events.get(dedupKey)
+                    events.set(dedupKey, existingEvent ? dedupEvent(existingEvent, event) : event)
+                },
+                onEose: () => once(() => {
+                    eoseCount++
+                    if (eoseCount === 1 && graceMs > 0 && !resolved) {
+                        graceTimer = setTimeout(() => finish("grace after first end of stream"), graceMs)
                     }
-                    console.log(`fetchEventsRaw connected to ${relay}, sending filter:`, JSON.stringify(filters))
-                    ws.send(JSON.stringify(['REQ', subscriptionId, filters]))
-                })
-
-                ws.on('message', (data: Buffer) => {
-                    try {
-                        const msg = JSON.parse(data.toString())
-                        
-                        if (msg[0] === 'EVENT' && msg[1] === subscriptionId) {
-                            const event = msg[2] as NostrEvent
-                            console.log("fetchEventsRaw received event:", event.id?.substring(0, 8), "kind:", event.kind, "from:", relay)
-                            
-                            const dedupKey = deduplicationKey(event)
-                            const existingEvent = events.get(dedupKey)
-                            if (existingEvent) {
-                                events.set(dedupKey, dedupEvent(existingEvent, event))
-                            } else {
-                                events.set(dedupKey, event)
-                            }
-                        } else if (msg[0] === 'EOSE' && msg[1] === subscriptionId) {
-                            console.log("fetchEventsRaw EOSE from:", relay)
-                            eoseCount++
-                            if (eoseCount === 1) {
-                                // Wait 2s after first EOSE for other relays
-                                setTimeout(() => closeAll(), 2000)
-                            } else if (eoseCount >= relays.length) {
-                                closeAll()
-                            }
-                        }
-                    } catch (err) {
-                        console.error("fetchEventsRaw error parsing message:", err)
-                    }
-                })
-
-                ws.on('error', (err: Error) => {
-                    console.error("fetchEventsRaw WebSocket error for", relay, ":", err.message)
-                })
-
-                ws.on('close', (code: number, reason: Buffer) => {
-                    console.log(`fetchEventsRaw connection closed to ${relay}, code: ${code}, reason: ${reason.toString()}`)
-                })
-            } catch (err) {
-                console.error("fetchEventsRaw failed to connect to", relay, ":", err)
-            }
-        })
-
-        // Absolute timeout
-        setTimeout(() => {
-            if (!closed) {
-                console.log("fetchEventsRaw timeout reached")
-                closeAll()
-            }
-        }, 12000)
+                    relayDone()
+                }),
+                onClose: (reason) => once(() => {
+                    if (!resolved) console.log("fetchEventsRaw relay", relay, "closed:", reason)
+                    relayDone()
+                }),
+            }).then((close) => {
+                if (resolved) close()
+                else closers.push(close)
+            })
+        }
     })
 }
 

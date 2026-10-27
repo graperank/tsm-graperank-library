@@ -3,12 +3,11 @@ import { RankedPov, subjectId, Interpreter, InterpreterRequest, InteractionsMap,
 import { EventActorReference, EventActorBindings, PovActorContext } from '../graperank/nostr-types'
 import { EventReferenceTarget, EventReferenceTypes, NostrEventField, NostrEventFields, NostrInterpreterClassConfig, NostrInterpreterId, NostrInterpreterKeys, NostrInterpreterParams, NostrType } from "./types"
 import { applyInteractionsByTag } from "./callbacks"
-import { buildEventActorId, decodeEventReference, deriveActorIdsFromRankedPov, extractDTagValue, extractPaginationDTags, extractReferenceTags, fetchEvents, hasEventReferenceTags, isEventType, isPubkeyType, isRelayUrl, maxfetch, mergeRelayLists, normalizeEventActorReference, parseCoordinate, parseEventActorId, parseReferenceRank, sliceBigArray, sleep, validateNostrTypeValue } from "./helpers"
+import { buildEventActorId, decodeEventReference, deriveActorIdsFromRankedPov, extractDTagValue, extractPaginationDTags, extractReferenceTags, fetchDelayFor, fetchEvents, hasEventReferenceTags, isEventType, isPubkeyType, isRelayUrl, maxfetch, mergeRelayLists, normalizeEventActorReference, parseCoordinate, parseEventActorId, parseReferenceRank, sliceBigArray, sleep, validateNostrTypeValue } from "./helpers"
 import WebSocket from 'ws'
 import { InterpreterFactory } from '../graperank/interpretation'
 useWebSocketImplementation(WebSocket)
 
-const delaybetweenfetches = 500 // milliceconds
 const fetchRetryAttempts = 3
 const fetchRetryBackoffMs = 250
 const eventActorFetchConcurrency = 20
@@ -790,7 +789,8 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
 
             const eventActorReferenceFilters = this.buildEventActorReferenceFetchFilters(eventActorReference)
 
-            await sleep(delaybetweenfetches)
+            // Politeness delay for external relays; none when every relay is local.
+            await sleep(fetchDelayFor(relays))
             const fetchedEventSets = await Promise.all(
               eventActorReferenceFilters.map((filter) => this.fetchEventsWithRetry(filter, relays))
             )
@@ -861,10 +861,13 @@ export class NostrInterpreterClass<ParamsType extends NostrInterpreterParams> im
         authors : actorslists[index] as string[],
         kinds : this.fetchKinds,
       }
-      // delay between relay requests
-      await new Promise<void>((resolve)=>{
-        setTimeout(()=> resolve(), delaybetweenfetches)
-      })
+      // politeness delay between relay requests (none when every relay is local)
+      const delayMs = fetchDelayFor(NostrInterpreterClass.relays)
+      if (delayMs > 0) {
+        await new Promise<void>((resolve)=>{
+          setTimeout(()=> resolve(), delayMs)
+        })
+      }
       promises.push(this.fetchEventsPromise(fetchfilter, fetchedSet, index  as unknown as number))
     }
     // wait for all promises to resolve
