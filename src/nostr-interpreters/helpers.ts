@@ -274,8 +274,14 @@ export async function fetchEvents(
             if (closed) return;
             closed = true;
             console.log("fetchEvents closing with", events.size, "events")
-            h.close()
-            pool.close(relays)
+            try { h.close() } catch (err) { console.warn("fetchEvents: subscription close failed:", err) }
+            // `pool.close` only closes relays whose connection completed. A
+            // relay that is still connecting at this point would otherwise
+            // finish later and stay open forever (observed: ~16k leaked
+            // sockets per slow relay after months). `destroy()` tears down
+            // every relay in the pool, connected or not.
+            try { pool.close(relays) } catch (err) { console.warn("fetchEvents: pool close failed:", err) }
+            try { (pool as unknown as { destroy?: () => void }).destroy?.() } catch (err) { console.warn("fetchEvents: pool destroy failed:", err) }
             resolve(new Set(events.values()));
         };
 
@@ -347,9 +353,18 @@ async function fetchEventsRaw(
             closed = true
             console.log("fetchEventsRaw closing with", events.size, "events from", eoseCount, "relays")
             connections.forEach(ws => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify(['CLOSE', subscriptionId]))
-                    ws.close()
+                try {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify(['CLOSE', subscriptionId]))
+                        ws.close()
+                    } else {
+                        // CONNECTING or CLOSING: abort the handshake / force
+                        // the socket down so a slow relay cannot leave it
+                        // open after we have resolved.
+                        ws.terminate()
+                    }
+                } catch (err) {
+                    console.warn("fetchEventsRaw: close failed for a connection:", err)
                 }
             })
             resolve(new Set(events.values()))
@@ -361,6 +376,12 @@ async function fetchEventsRaw(
                 connections.push(ws)
 
                 ws.on('open', () => {
+                    if (closed) {
+                        // Connected after we already resolved: do not open a
+                        // subscription that nobody will close.
+                        try { ws.close() } catch { /* ignore */ }
+                        return
+                    }
                     console.log(`fetchEventsRaw connected to ${relay}, sending filter:`, JSON.stringify(filters))
                     ws.send(JSON.stringify(['REQ', subscriptionId, filters]))
                 })
